@@ -1,0 +1,797 @@
+import express from "express";
+import cors from "cors";
+import pkg from "pg";
+import dotenv from "dotenv";
+
+dotenv.config();
+const { Pool } = pkg;
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// 🔹 Conexión a PostgreSQL
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT || 5432,
+});
+
+app.get("/", (req, res) => {
+  res.send("Servidor funcionando");
+});
+
+///#########################              queries    generales          ######################/
+// 🔹 Obtener todos los registros de una tabla específica
+app.get("/nota", async (req, res) => {
+  try {
+    const { table } = req.params;
+    const result = await pool.query(`SELECT * FROM nota ORDER BY id`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Error al obtener tabla completa:", err.message);
+    res.status(500).json({ error: "Error al obtener tabla completa" });
+  }
+});
+///#######################################################################################
+
+
+
+
+
+
+//@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  vista registros     /@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+// guarda un registro completo 
+app.post("/registro-guardar", async (req, res) => {
+  const datos = req.body;
+
+  try {
+    // -------------------------
+    // 0️⃣ Validar certificado único
+    // -------------------------
+    if (datos.Certificado && !datos.CertificadoOk) {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM registros WHERE certificado = $1`,
+        [datos.Certificado]
+      );
+      if (rows.length > 0) {
+        return res.status(400).json({ error: "Este certificado ya fue utilizado." });
+      }
+    }
+
+    // -------------------------
+    // 1️⃣ Construir INSERT dinámico para "registros" (sin 'Linea' ni 'id')
+    // -------------------------
+    const columnas = [];
+    const placeholders = [];
+    const values = [];
+
+    let i = 1;
+    for (const key in datos) {
+      if (datos[key] !== undefined && datos[key] !== null && key.toLowerCase() !== "linea" && key.toLowerCase() !== "id") {
+        columnas.push(key.toLowerCase());
+        placeholders.push(`$${i}`);
+        values.push(datos[key]);
+        i++;
+      }
+    }
+
+    if (columnas.length === 0) {
+      return res.status(400).json({ error: "No se enviaron datos para guardar." });
+    }
+
+    const insertQuery = `
+      INSERT INTO registros(${columnas.join(",")})
+      VALUES(${placeholders.join(",")})
+      RETURNING *
+    `;
+    const insertResult = await pool.query(insertQuery, values);
+    const registroId = insertResult.rows[0].id;
+
+    // -------------------------
+    // 2️⃣ Actualizar folio dinámicamente si CertificadoOk = false y Certificado no es nulo
+    // -------------------------
+    if (!datos.CertificadoOk && datos.Certificado) {
+      const updateCols = ["utilizado = TRUE"];
+      const updateValues = [];
+      let j = 1;
+
+      if (datos.fechaactualizacion) { updateCols.push(`fechaactualizacion = $${j++}`); updateValues.push(datos.fechaactualizacion); }
+      if (datos.Linea) { updateCols.push(`linea = $${j++}`); updateValues.push(datos.Linea); }
+      if (datos.UsuarioActual) { updateCols.push(`usuarioactual = $${j++}`); updateValues.push(datos.UsuarioActual); }
+      updateCols.push(`id_registro = $${j++}`); updateValues.push(registroId);
+
+      const updateFolioQuery = `
+        UPDATE folios
+        SET ${updateCols.join(", ")}
+        WHERE certificado = $${j}
+        RETURNING *
+      `;
+      updateValues.push(datos.Certificado);
+
+      await pool.query(updateFolioQuery, updateValues);
+    }
+
+    res.json({ registro: insertResult.rows[0], message: "Registro guardado correctamente" });
+
+  } catch (err) {
+    console.error("❌ Error guardando registro:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+// actualiza la tabla folio
+app.post("/registro-actualizar-folio", async (req, res) => {
+  const datos = req.body; // puede contener: certificado, fechaactualizacion, linea, usuarioactual, id_registro
+
+  try {
+    const updateCols = [];
+    const updateValues = [];
+    let i = 1;
+
+    if (datos.fechaactualizacion) { updateCols.push(`fechaactualizacion = $${i++}`); updateValues.push(datos.fechaactualizacion); }
+    if (datos.linea) { updateCols.push(`linea = $${i++}`); updateValues.push(datos.linea); }
+    if (datos.usuarioactual) { updateCols.push(`usuarioactual = $${i++}`); updateValues.push(datos.usuarioactual); }
+    if (datos.id_registro) { updateCols.push(`id_registro = $${i++}`); updateValues.push(datos.id_registro); }
+
+    updateCols.push(`utilizado = TRUE`); // Siempre marcar como usado
+
+    if (!datos.certificado) {
+      return res.status(400).json({ error: "Debe enviarse el certificado a actualizar." });
+    }
+
+    const updateQuery = `
+      UPDATE folios
+      SET ${updateCols.join(", ")}
+      WHERE certificado = $${i}
+      RETURNING *
+    `;
+    updateValues.push(datos.certificado);
+
+    const result = await pool.query(updateQuery, updateValues);
+    res.json({ folio: result.rows[0], message: "Folio actualizado correctamente" });
+
+  } catch (err) {
+    console.error("❌ Error actualizando folio:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+// extrae la nota que va en el utlimo digito fNNN
+app.post("/actualizar-nota", async (req, res) => {
+  try {
+    const { nota } = req.body;
+
+    if (!nota) {
+      return res.status(400).json({ error: "Debes enviar la nota a actualizar" });
+    }
+
+    // Actualizamos solo el registro con id = 1
+    const updateQuery = `
+      UPDATE nota
+      SET nota = $1
+      WHERE id = 1
+      RETURNING *
+    `;
+    const result = await pool.query(updateQuery, [nota]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ mensaje: "No se encontró la nota con id 1" });
+    }
+
+    res.json({ mensaje: "Nota actualizada correctamente", nota: result.rows[0] });
+
+  } catch (err) {
+    console.error("❌ Error actualizando nota:", err.message);
+    res.status(500).json({ error: "Error actualizando nota" });
+  }
+});
+// 🔹 Obtener folios no utilizados por línea (POST con JSON)
+app.get("/folios-no-utilizados", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM folios
+      WHERE utilizado = false
+      ORDER BY certificado
+    `;
+    const result = await pool.query(query);
+    
+    res.json(result.rows);
+
+  } catch (err) {
+    console.error("❌ Error obteniendo folios no utilizados:", err.message);
+    res.status(500).json({ error: "Error obteniendo folios no utilizados" });
+  }
+});
+
+///@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+
+
+
+
+
+
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  vista folios linea 1  /!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// 🔹 Obtener folios con información de registros
+app.post("/folios-join", async (req, res) => {
+  try {
+    const { filters } = req.body; // filtros opcionales
+
+    // Columnas fijas a seleccionar
+    const selectColumns = `
+      f.certificado,
+      f.utilizado,
+      r.usuarioactual,
+      f.fechaactualizacion,
+      f.linea,
+      r.nombreCliente,
+      r.referencia,
+      r.referencia2,
+      r.cantidadCredito,
+      r.uso,
+      r.year,
+      r.estado,
+      r.fechaRegistro,
+      r.placa
+    `;
+
+    // Filtros dinámicos
+    let filterClause = "";
+    let values = [];
+    if (filters && Object.keys(filters).length > 0) {
+      const whereClauses = [];
+      let idx = 1;
+      for (const key in filters) {
+        whereClauses.push(`${key} = $${idx++}`);
+        values.push(filters[key]);
+      }
+      filterClause = "WHERE " + whereClauses.join(" AND ");
+    }
+
+    // Query con join fijo
+    const query = `
+      SELECT ${selectColumns}
+      FROM folios f
+      LEFT JOIN registros r
+      ON r.certificado = f.certificado
+      ${filterClause}
+      ORDER BY f.certificado
+    `;
+
+    const result = await pool.query(query, values);
+    res.json(result.rows);
+
+  } catch (err) {
+    console.error("❌ Error obteniendo folios con join:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+///!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+
+
+////////////////////////////////////// update excel ///////////////////////////////////
+// Endpoint para insertar múltiples registros desde Excel
+// Convierte "DD/MM/YY" o "DD/MM/YYYY" a Date UTC
+function parseExcelDateUTC(fechaStr) {
+  if (!fechaStr) return null;
+
+  // Detecta formato DD/MM/YY o DD/MM/YYYY
+  const partes = fechaStr.split('/').map(Number);
+  if (partes.length === 3) {
+    let [d, m, y] = partes;
+    if (y < 100) y += 2000; // '25' → 2025
+    // Crear Date usando UTC para que no se reste un día
+    return new Date(Date.UTC(y, m - 1, d));
+  }
+
+  // Si viene en formato textual "Wednesday, October 1, 2025"
+  const fecha = new Date(fechaStr);
+  if (!isNaN(fecha)) {
+    // Convertimos a UTC manteniendo día exacto
+    return new Date(Date.UTC(fecha.getFullYear(), fecha.getMonth(), fecha.getDate()));
+  }
+
+  return null;
+}
+
+
+function normalizeDate(dateStr) {
+  if (!dateStr) return null;
+  // fuerza YYYY-MM-DD como STRING, no Date
+  return dateStr.toString().substring(0, 10);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////actualizar desde excel
+app.post("/insert-registros-excel", async (req, res) => {
+  try {
+    const reg = req.body;
+    const {
+      placa, estado, noserie, fechaalta, fecharegistro, certificado,
+      nombreCliente, combustible, year, marca, submarca, tecnico,
+      linea, usuarioactual, uso, certificadook
+    } = reg;
+
+    console.log('📄 Recibiendo registro desde frontend:', reg);
+
+    const fechaRegistroPG = normalizeDate(fecharegistro);
+    const fechaAltaPG = normalizeDate(fechaalta);
+
+    console.log('fechas-------------------', fechaAltaPG);
+    /* =====================================================
+       1️⃣ BUSCAR REGISTRO EXISTENTE POR PLACA
+    ===================================================== */
+    const { rows: placaRows } = await pool.query(
+      `SELECT id, fecharegistro
+       FROM registros
+       WHERE placa = $1
+       ORDER BY fecharegistro DESC
+       LIMIT 1`,
+      [placa]
+    );
+
+    const existePlaca = placaRows.length > 0;
+
+    /* =====================================================
+       2️⃣ SI EXISTE → VALIDAR ANTIGÜEDAD
+    ===================================================== */
+    if (existePlaca) {
+      const lastReg = placaRows[0];
+
+      if (!lastReg.fecharegistro) {
+        return res.status(200).json({
+          accion: 'no_actualizado',
+          mensaje: `⚠️ Registro previo de la placa ${placa} sin fecha.`
+        });
+      }
+
+      const [y, m, d] = fechaRegistroPG.split('-').map(Number);
+
+      // Fecha Excel (medianoche lógica)
+      const fechaExcel = Date.UTC(y, m - 1, d);
+
+      // Fecha hoy (medianoche lógica)
+      const hoy = new Date();
+      const fechaHoyUTC = Date.UTC(
+        hoy.getFullYear(),
+        hoy.getMonth(),
+        hoy.getDate()
+      );
+
+      // Diferencia en días (SIEMPRE correcta)
+      const diffDias = Math.abs(
+        (fechaHoyUTC - fechaExcel) / (1000 * 60 * 60 * 24)
+      );
+
+      if (diffDias > 7) {
+        console.log(`⏳ La placa ${placa} NO se actualizó porque la fecha del Excel tiene ${Math.floor(diffDias)} días. fecha ${fechaalta}`);
+        return res.status(200).json({
+          accion: 'no_actualizado',
+          mensaje: `⏳ La placa ${placa} NO se actualizó porque la fecha del Excel tiene ${Math.floor(diffDias)} días. }`
+          
+        });
+        
+      }
+
+      console.log({
+        fechaAltaPG,
+        fechaRegistroPG,
+        tipoAlta: typeof fechaAltaPG,
+        tipoRegistro: typeof fechaRegistroPG
+      });
+      /* =====================================================
+         3️⃣ ACTUALIZAR REGISTRO EXISTENTE
+      ===================================================== */
+      const updateQuery = `
+        UPDATE registros
+        SET placa = $1, estado = $2, noserie = $3, fechaalta = $4::date,
+            fecharegistro = $5::date, certificado = $6, nombrecliente = $7,
+            combustible = $8, year = $9, marca = $10, submarca = $11,
+            tecnico = $12, usuarioactual = $13, uso = $14,
+            linea_registro = $15
+        WHERE id = $16
+        RETURNING id;
+      `;
+
+      const valuesUpdate = [
+        placa, estado, noserie, 
+        fechaAltaPG, 
+        fechaRegistroPG,
+        certificado, nombreCliente, combustible, year,
+        marca, submarca, tecnico, usuarioactual, uso,
+        linea, lastReg.id
+      ];
+
+      const updateRes = await pool.query(updateQuery, valuesUpdate);
+      const idRegistro = updateRes.rows[0].id;
+
+      /* =====================================================
+         4️⃣ ACTUALIZAR FOLIO
+      ===================================================== */
+      await pool.query(
+        `UPDATE folios
+         SET utilizado = TRUE,
+             linea = $1,
+             fechaactualizacion = NOW(),
+             usuarioactual = 'Excel',
+             id_registro = $2
+         WHERE certificado = $3`,
+        [linea, idRegistro, certificado]
+      );
+
+      return res.status(200).json({
+        accion: 'actualizado',
+        mensaje: `📝 Registro de la placa ${placa} actualizado correctamente.`
+      });
+    }
+
+    /* =====================================================
+       5️⃣ NO EXISTE PLACA → VALIDAR FOLIO
+    ===================================================== */
+    const { rows: folioRows } = await pool.query(
+      `SELECT id, utilizado FROM folios WHERE certificado = $1`,
+      [certificado]
+    );
+
+    if (folioRows.length === 0) {
+      return res.status(200).json({
+        accion: 'no_insertado',
+        mensaje: `❌ Folio ${certificado} no existe en la tabla folios.`
+      });
+    }
+
+    if (folioRows[0].utilizado) {
+      return res.status(200).json({
+        accion: 'no_insertado',
+        mensaje: `⚠️ El folio ${certificado} ya está utilizado.`
+      });
+    }
+
+    /* =====================================================
+       6️⃣ INSERTAR NUEVO REGISTRO
+    ===================================================== */
+    console.log({
+      fechaAltaPG,
+      fechaRegistroPG,
+      tipoAlta: typeof fechaAltaPG,
+      tipoRegistro: typeof fechaRegistroPG
+    });
+    const insertQuery = `
+      INSERT INTO registros (
+        placa, estado, noserie, fechaalta, fecharegistro,
+        certificado, nombrecliente, combustible, year,
+        marca, submarca, tecnico, usuarioactual, uso,
+         linea_registro
+      )
+      VALUES ($1,$2,$3,$4::date,$5::date,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      RETURNING id;
+    `;
+
+    const valuesInsert = [
+      placa, estado, noserie, 
+      fechaAltaPG,  
+      fechaRegistroPG,
+      certificado, nombreCliente, combustible, year,
+      marca, submarca, tecnico, usuarioactual, uso,
+       linea
+    ];
+
+    const insertRes = await pool.query(insertQuery, valuesInsert);
+    const idRegistro = insertRes.rows[0].id;
+
+    /* =====================================================
+       7️⃣ ACTUALIZAR FOLIO
+    ===================================================== */
+    await pool.query(
+      `UPDATE folios
+       SET utilizado = TRUE,
+           linea = $1,
+           fechaactualizacion = NOW(),
+           usuarioactual = 'Excel',
+           id_registro = $2
+       WHERE certificado = $3`,
+      [linea, idRegistro, certificado]
+    );
+
+    return res.status(200).json({
+      accion: 'insertado',
+      mensaje: `✅ Registro insertado correctamente para la placa ${placa}.`
+    });
+
+  } catch (err) {
+    console.error("❌ Error procesando registro:", err);
+
+    if (err.code?.toString() === '23505') {
+      return res.status(200).json({
+        accion: 'duplicado',
+        mensaje: `⚠️ Registro duplicado: ${err.detail}`
+      });
+    }
+
+    return res.status(500).json({
+      accion: 'error',
+      mensaje: `❌ Error interno: ${err.message}`
+    });
+  }
+});
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$   vista estatales   $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+// 🔹 Obtener registros con la línea desde folios
+app.post("/folios-join-registros", async (req, res) => {
+  try {
+    // 🔹 Columnas fijas a seleccionar
+    const selectColumns = `
+      r.id,                    -- ✅ agrega esto
+      r.certificado,
+      r.certificadook,
+      r.combustible,
+      r.cantidadcredito,
+      r.costo,
+      r.estado,
+      r.fechaalta,
+      r.fechapago,
+      r.fecharegistro,
+      r.gmail,
+      f.linea AS linea_registro,
+      r.multa,
+      r.noalta,
+      r.noserie,
+      r.nombrecliente,
+      r.nota,
+      r.placa,
+      r.referencia,
+      r.referencia2,
+      r.telefono,
+      r.uso,
+      r.usuarioactual,
+      r.year,
+      r.estatusmulta,
+      r.entidad,
+      f.linea AS linea_folio,
+      r.marca,
+      r.submarca,
+      r.tecnico
+    `;
+
+
+    // 🔹 Query fija sin filtros
+    const query = `
+      SELECT ${selectColumns}
+      FROM registros r
+      LEFT JOIN folios f
+      ON r.certificado = f.certificado
+      ORDER BY r.certificado
+    `;
+
+    const result = await pool.query(query);
+    res.json(result.rows);
+
+  } catch (err) {
+    console.error("❌ Error obteniendo registros con línea de folios:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//actualiza el registro
+app.post("/estatles-actualizar-registro", async (req, res) => {
+  const datos = req.body;
+
+  try {
+    // -------------------------
+    // 1️⃣ Validar que venga el ID
+    // -------------------------
+    if (!datos.id) {
+      return res.status(400).json({ error: "Falta el ID del registro a actualizar." });
+    }
+
+    const idRegistro = datos.id;
+    delete datos.id; // evitar actualizar el ID
+
+    // -------------------------
+    // 2️⃣ Construir SET dinámico
+    // -------------------------
+    const columnas = [];
+    const values = [];
+    let i = 1;
+
+    for (const key in datos) {
+      if (datos[key] !== undefined && datos[key] !== null) {
+        columnas.push(`${key.toLowerCase()} = $${i}`);
+        values.push(datos[key]);
+        i++;
+      }
+    }
+
+    if (columnas.length === 0) {
+      return res.status(400).json({ error: "No se enviaron datos para actualizar." });
+    }
+
+    const updateQuery = `
+      UPDATE registros
+      SET ${columnas.join(", ")}
+      WHERE id = $${i}
+      RETURNING *
+    `;
+    values.push(idRegistro);
+
+    const result = await pool.query(updateQuery, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Registro no encontrado." });
+    }
+
+    res.json({
+      registro: result.rows[0],
+      message: "✅ Registro actualizado correctamente."
+    });
+
+  } catch (err) {
+    console.error("❌ Error actualizando registro:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+
+
+
+
+////+++++++++++++++++++++++++++++++++++++++++++    configuraciones ++++++++++++++++++++++++++++
+// 🔹 Agregar varios folios nuevos a la tabla "folios"
+app.post("/agregar-folios", async (req, res) => {
+  try {
+    const { certificados } = req.body;
+
+    if (!Array.isArray(certificados) || certificados.length === 0) {
+      return res.status(400).json({
+        error: "Debe enviar un arreglo de certificados"
+      });
+    }
+
+    let foliosAgregados = [];
+    let foliosDuplicados = [];
+
+    for (const certificado of certificados) {
+      try {
+        const result = await pool.query(
+          `
+          INSERT INTO folios (certificado, utilizado, usuarioactual, fechaactualizacion)
+          VALUES ($1, false, NULL, NULL)
+          RETURNING *
+          `,
+          [certificado]
+        );
+
+        foliosAgregados.push(result.rows[0]);
+      } catch (err) {
+        if (err.code === '23505') {
+          foliosDuplicados.push(certificado);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    res.json({
+      mensaje: `✅ Proceso terminado`,
+      foliosAgregados,
+      foliosDuplicados
+    });
+
+  } catch (err) {
+    console.error("❌ Error agregando folios:", err);
+    res.status(500).json({ error: "Error agregando folios" });
+  }
+});
+
+
+
+
+///++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+///////////////////////tabla nota/////////////////////
+// 🔹 Endpoint para obtener el valor de mi_tabla
+app.get("/nota", async (req, res) => {
+  try {
+    const query = `
+      SELECT *
+      FROM mi_tabla
+      WHERE id = 1
+    `;
+
+    const result = await pool.query(query);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ mensaje: "No se encontró el registro" });
+    }
+
+    res.json(result.rows[0]);
+
+  } catch (err) {
+    console.error("❌ Error obteniendo registro de mi_tabla:", err.message);
+    res.status(500).json({ error: "Error obteniendo registro" });
+  }
+});
+
+
+
+
+app.put("/actualizar-por-certificado", async (req, res) => {
+  try {
+    const { tabla, certificado, data, linea } = req.body;
+
+    if (!tabla || !certificado || !data || Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "Falta tabla, certificado o datos a actualizar" });
+    }
+
+    // Construir query de UPDATE
+    const setClauses = [];
+    const values = [];
+    let idx = 1;
+
+    for (const key in data) {
+      setClauses.push(`${key} = $${idx++}`);
+      values.push(data[key]);
+    }
+
+    values.push(certificado);
+
+    const updateQuery = `
+      UPDATE ${tabla}
+      SET ${setClauses.join(", ")}
+      WHERE certificado = $${idx}
+      RETURNING *
+    `;
+    const updateResult = await pool.query(updateQuery, values);
+
+    if (updateResult.rows.length > 0) {
+      return res.json({
+        mensaje: `Registro actualizado correctamente en la tabla "${tabla}"`,
+        registroActualizado: updateResult.rows[0]
+      });
+    }
+
+    // Si quieres crear un registro nuevo, hazlo solo si el certificado **no existe**:
+    const checkCertificado = await pool.query(`SELECT 1 FROM ${tabla} WHERE certificado = $1`, [certificado]);
+    if (checkCertificado.rows.length === 0) {
+      const insertColumns = ["certificado", ...Object.keys(data)];
+      const insertValues = [certificado, ...Object.values(data)];
+      if (linea) {
+        insertColumns.push("linea");
+        insertValues.push(linea);
+      }
+      const placeholders = insertValues.map((_, i) => `$${i + 1}`);
+      const insertQuery = `
+        INSERT INTO ${tabla} (${insertColumns.join(", ")})
+        VALUES (${placeholders.join(", ")})
+        RETURNING *
+      `;
+      const insertResult = await pool.query(insertQuery, insertValues);
+      return res.json({
+        mensaje: `No existía, se creó un nuevo registro en la tabla "${tabla}"`,
+        registroCreado: insertResult.rows[0]
+      });
+    }
+
+    return res.status(400).json({ error: "El certificado ya existe y no se puede insertar duplicado." });
+
+  } catch (err) {
+    console.error("❌ Error actualizando o creando registro:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// 🔹 Servidor
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`));
