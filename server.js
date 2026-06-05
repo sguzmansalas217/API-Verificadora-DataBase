@@ -42,7 +42,7 @@ async function guardarConReglas(data) {
   const diffDias = (hoy - fechaNueva) / (1000 * 60 * 60 * 24);
 
   // 🚫 MÁS DE 7 DÍAS
-  if (diffDias > 7) {
+  if (diffDias > 15) {
     return "omitido";
   }
 
@@ -201,6 +201,40 @@ async function insertTabla(tabla, data) {
 }
 // 🔹 Endpoints por tabla
 const tablas = ["registros", "notas", "porhacer"];
+
+app.get("/api/registros/nota-actual", verificarApiKey, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      WITH notas_limpias AS (
+        SELECT DISTINCT
+          nota,
+          CAST(regexp_replace(nota::text, '[^0-9]', '', 'g') AS INTEGER) AS numero
+        FROM registros
+        WHERE nota IS NOT NULL
+          AND nota::text ~ '[0-9]+'
+      )
+      SELECT nl.nota, nl.numero
+      FROM notas_limpias nl
+      WHERE EXISTS (SELECT 1 FROM notas_limpias n WHERE n.numero = nl.numero - 1)
+        AND EXISTS (SELECT 1 FROM notas_limpias n WHERE n.numero = nl.numero - 2)
+        AND EXISTS (SELECT 1 FROM notas_limpias n WHERE n.numero = nl.numero - 3)
+        AND EXISTS (SELECT 1 FROM notas_limpias n WHERE n.numero = nl.numero - 4)
+        AND EXISTS (SELECT 1 FROM notas_limpias n WHERE n.numero = nl.numero - 5)
+      ORDER BY nl.numero DESC
+      LIMIT 1;
+    `);
+
+    res.json({
+      notaActual: result.rows[0]?.nota || "SIN NOTA",
+      valida: !!result.rows[0],
+      faltantes: []
+    });
+
+  } catch (error) {
+    console.error("Error obteniendo nota actual:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // GET → lee registros, opcionalmente con filtros
 app.get("/api/:tabla", verificarApiKey, async (req, res) => {
