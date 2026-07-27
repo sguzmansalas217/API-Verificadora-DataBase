@@ -42,7 +42,7 @@ async function guardarConReglas(data) {
   const diffDias = (hoy - fechaNueva) / (1000 * 60 * 60 * 24);
 
   // 🚫 MÁS DE 7 DÍAS
-  if (diffDias > 15) {
+  if (diffDias > 25) {
     return "omitido";
   }
 
@@ -320,6 +320,190 @@ async function updateTabla(tabla, id, data) {
   const result = await pool.query(query, valores);
   return result.rows[0];
 }
+
+// 🔹 Obtener todos los registros federales
+app.get("/registrofederal", verificarApiKey, async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM registrofederal ORDER BY fecharegistro DESC;`);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error al obtener registros federales:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔹 Actualizar registro federal por id
+app.put("/registrofederal/:id", verificarApiKey, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = { ...req.body };
+    delete data.id;
+
+    const columnas = Object.keys(data);
+    const valores  = Object.values(data);
+
+    if (columnas.length === 0) {
+      return res.status(400).json({ error: "No hay datos para actualizar" });
+    }
+
+    const setClause = columnas.map((col, i) => `${col} = $${i + 1}`).join(", ");
+    const result = await pool.query(
+      `UPDATE registrofederal SET ${setClause} WHERE id = $${columnas.length + 1} RETURNING *;`,
+      [...valores, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Registro no encontrado" });
+    }
+
+    res.json({ mensaje: "Registro federal actualizado", registro: result.rows[0] });
+  } catch (error) {
+    console.error("Error al actualizar registro federal:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔹 Guardar registro federal
+app.post("/registrofederal-guardar", verificarApiKey, async (req, res) => {
+  try {
+    const {
+      Parque,
+      Placa,
+      NoSerie,
+      Marca,
+      Tipo,
+      Ejes,
+      Modelo,
+      Propietario,
+      Combustible,
+      Fisico,
+      Emisiones1,
+      Emisiones2,
+      UsuarioActual
+    } = req.body;
+
+    if (!Parque || !Placa || !NoSerie || !Marca || !Tipo || !Ejes || !Modelo || !Propietario || !Combustible) {
+      return res.status(400).json({ error: "Faltan campos obligatorios" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO registrofederal (parque, placa, noserie, marca, tipo, ejes, modelo, propietario, combustible, fisico, emisiones1, emisiones2, usuarioactual)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *;`,
+      [Parque, Placa, NoSerie, Marca, Tipo, Ejes, Modelo, Propietario, Combustible, Fisico || null, Emisiones1 || null, Emisiones2 || null, UsuarioActual || "UsuarioNodeJS"]
+    );
+
+    res.json({ mensaje: "Registro federal guardado correctamente", registro: result.rows[0] });
+
+  } catch (error) {
+    console.error("Error al guardar registro federal:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔹 Registrar folio federal (Emisiones o Físico) contra el catálogo de parques vehiculares
+app.post("/registrofederal-folio", verificarApiKey, async (req, res) => {
+  try {
+    const { folio, placa, nombre, fecha, registrofederal_id, confirmarSobrescritura, usuarioactual } = req.body;
+
+    if (!folio || !placa || !nombre || !fecha) {
+      return res.status(400).json({ error: "Folio, Placa, Nombre y Fecha son obligatorios" });
+    }
+
+    const placaNorm = placa.trim().toUpperCase();
+    const nombreNorm = nombre.trim().toUpperCase().replace(/\s+/g, " ");
+    const folioNorm = folio.replace(/\s+/g, "").toUpperCase();
+
+    let vehiculo;
+
+    if (registrofederal_id) {
+      const r = await pool.query(`SELECT * FROM registrofederal WHERE id = $1`, [registrofederal_id]);
+      if (r.rows.length === 0) {
+        return res.status(404).json({ error: "El vehículo indicado no existe" });
+      }
+      if (r.rows[0].placa.trim().toUpperCase() !== placaNorm) {
+        return res.status(400).json({ error: "El id indicado no corresponde a la placa proporcionada" });
+      }
+      vehiculo = r.rows[0];
+    } else {
+      const r = await pool.query(
+        `SELECT * FROM registrofederal WHERE upper(btrim(placa)) = $1`,
+        [placaNorm]
+      );
+
+      if (r.rows.length === 0) {
+        return res.status(404).json({ error: "Placa no encontrada en el catálogo de parques vehiculares" });
+      }
+
+      if (r.rows.length > 1) {
+        return res.status(409).json({
+          error: "Placa ambigua, se encontró más de un vehículo",
+          candidatos: r.rows.map(v => ({
+            id: v.id,
+            parque: v.parque,
+            marca: v.marca,
+            tipo: v.tipo,
+            propietario: v.propietario
+          }))
+        });
+      }
+
+      vehiculo = r.rows[0];
+    }
+
+    let tipo, columna, periodo = null;
+
+    if (/^[MA]\d+$/.test(folioNorm)) {
+      tipo = "fisico";
+      columna = "fisico";
+    } else if (/^\d+$/.test(folioNorm)) {
+      tipo = "emisiones";
+      const mes = new Date(fecha).getUTCMonth() + 1;
+      if (mes >= 1 && mes <= 6) {
+        columna = "emisiones1";
+        periodo = 1;
+      } else {
+        columna = "emisiones2";
+        periodo = 2;
+      }
+    } else {
+      return res.status(400).json({ error: "Formato de folio no reconocido" });
+    }
+
+    const folioAnterior = vehiculo[columna];
+
+    if (folioAnterior && !confirmarSobrescritura) {
+      return res.status(409).json({
+        requiereConfirmacion: true,
+        folioAnterior,
+        mensaje: `Ya existe un folio (${folioAnterior}) registrado en ${columna}. ¿Deseas sobrescribirlo?`
+      });
+    }
+
+    const actualizado = await pool.query(
+      `UPDATE registrofederal SET ${columna} = $1, nombre = $2 WHERE id = $3 RETURNING *;`,
+      [folioNorm, nombreNorm, vehiculo.id]
+    );
+
+    await pool.query(
+      `INSERT INTO registrofederal_folios
+        (registrofederal_id, folio, tipo, periodo, folio_anterior, nombre, fecha, placa, parque, usuarioactual)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);`,
+      [vehiculo.id, folioNorm, tipo, periodo, folioAnterior || null, nombre, fecha, placaNorm, vehiculo.parque, usuarioactual || "UsuarioNodeJS"]
+    );
+
+    res.json({
+      mensaje: "Folio registrado correctamente",
+      sobrescrito: !!folioAnterior,
+      folioAnterior: folioAnterior || null,
+      registro: actualizado.rows[0]
+    });
+
+  } catch (error) {
+    console.error("Error al registrar folio federal:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
