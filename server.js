@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import pkg from "pg";
 import dotenv from "dotenv";
 
@@ -8,6 +9,7 @@ const { Pool } = pkg;
 
 const app = express();
 app.use(cors());
+app.use(compression());
 app.use(express.json());
 const API_KEY = process.env.API_KEY || "mi_clave_secreta";
 
@@ -140,19 +142,30 @@ app.get("/", verificarApiKey, (req, res) => {
 
 // 🔹 Función genérica para obtener registros de cualquier tabla
 async function getTabla(tabla, filters = {}) {
-  
+  const { fecha_desde, fecha_hasta, ...igualdad } = filters || {};
+
   let query = `SELECT * FROM ${tabla}`;
   const values = [];
+  const condiciones = [];
 
-  
-  if (filters && Object.keys(filters).length > 0) {
-    const where = Object.keys(filters).map((k, i) => {
-      values.push(filters[k]);
-      return `${k} = $${i + 1}`;
-    }).join(" AND ");
-    query += ` WHERE ${where}`;
-    
+  Object.keys(igualdad).forEach((k) => {
+    values.push(igualdad[k]);
+    condiciones.push(`${k} = $${values.length}`);
+  });
+
+  if (fecha_desde) {
+    values.push(fecha_desde);
+    condiciones.push(`fecharegistro >= $${values.length}`);
   }
+  if (fecha_hasta) {
+    values.push(fecha_hasta);
+    condiciones.push(`fecharegistro <= $${values.length}`);
+  }
+
+  if (condiciones.length > 0) {
+    query += ` WHERE ${condiciones.join(" AND ")}`;
+  }
+
   const result = await pool.query(query, values);
   return result.rows;
 }
