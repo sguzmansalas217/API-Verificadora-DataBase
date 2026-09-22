@@ -519,25 +519,39 @@ app.post("/registrofederal-folio", verificarApiKey, async (req, res) => {
 });
 
 // 🔹 Crear Orden de Trabajo y asignarle folio (atomico, persistente, nunca se repite ni se reinicia)
+// tipoOrden: 'federal' (folio F######) o 'estatal' (folio E######), contador independiente por tipo.
+const TIPOS_ORDEN_VALIDOS = ["federal", "estatal"];
+const SECUENCIA_POR_TIPO = {
+  federal: "orden_trabajo_folio_federal_seq",
+  estatal: "orden_trabajo_folio_estatal_seq",
+};
+const PREFIJO_POR_TIPO = { federal: "F", estatal: "E" };
+
 app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
   try {
     const {
-      parque, cliente, telefono, fecha, facturaOR, razonSocial, rfc,
+      tipoOrden, parque, cliente, telefono, fecha, facturaOR, razonSocial, rfc,
       calleNumero, colonia, estadoMunicipio, mail,
       tipoEmisiones, tipoFisico, tipoEstatal,
       total, vehiculos, usuarioactual
     } = req.body;
 
+    const tipo = TIPOS_ORDEN_VALIDOS.includes(tipoOrden) ? tipoOrden : "federal";
+    const secuencia = SECUENCIA_POR_TIPO[tipo];
+
+    const numeroResult = await pool.query(`SELECT nextval('${secuencia}') AS numero;`);
+    const numero = numeroResult.rows[0].numero;
+
     const result = await pool.query(
       `INSERT INTO orden_trabajo_folios
-        (parque, cliente, telefono, fecha, factura_or, razon_social, rfc,
+        (tipo, numero, parque, cliente, telefono, fecha, factura_or, razon_social, rfc,
          calle_numero, colonia, estado_municipio, mail,
          tipo_emisiones, tipo_fisico, tipo_estatal,
          total, vehiculos, usuarioactual)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING *;`,
       [
-        parque || null, cliente || null, telefono || null, fecha || null,
+        tipo, numero, parque || null, cliente || null, telefono || null, fecha || null,
         facturaOR || null, razonSocial || null, rfc || null,
         calleNumero || null, colonia || null, estadoMunicipio || null, mail || null,
         !!tipoEmisiones, !!tipoFisico, !!tipoEstatal,
@@ -546,7 +560,7 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
     );
 
     const orden = result.rows[0];
-    const folio = "F" + String(orden.numero).padStart(6, "0");
+    const folio = PREFIJO_POR_TIPO[tipo] + String(orden.numero).padStart(6, "0");
 
     res.json({ numero: orden.numero, folio, orden });
   } catch (error) {
