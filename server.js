@@ -518,6 +518,28 @@ app.post("/registrofederal-folio", verificarApiKey, async (req, res) => {
   }
 });
 
+// 🔹 Asignar siguiente folio de Orden de Trabajo (atomico, persistente, nunca se repite ni se reinicia)
+app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
+  try {
+    const { parque, cliente, usuarioactual } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO orden_trabajo_folios (parque, cliente, usuarioactual)
+       VALUES ($1, $2, $3)
+       RETURNING numero;`,
+      [parque || null, cliente || null, usuarioactual || "UsuarioNodeJS"]
+    );
+
+    const numero = result.rows[0].numero;
+    const folio = "F" + String(numero).padStart(6, "0");
+
+    res.json({ numero, folio });
+  } catch (error) {
+    console.error("Error al asignar folio de orden de trabajo:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`));
