@@ -518,24 +518,50 @@ app.post("/registrofederal-folio", verificarApiKey, async (req, res) => {
   }
 });
 
-// 🔹 Asignar siguiente folio de Orden de Trabajo (atomico, persistente, nunca se repite ni se reinicia)
+// 🔹 Crear Orden de Trabajo y asignarle folio (atomico, persistente, nunca se repite ni se reinicia)
 app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
   try {
-    const { parque, cliente, usuarioactual } = req.body;
+    const {
+      parque, cliente, telefono, fecha, facturaOR, razonSocial, rfc,
+      calleNumero, colonia, estadoMunicipio, mail,
+      tipoEmisiones, tipoFisico, tipoEstatal,
+      total, vehiculos, usuarioactual
+    } = req.body;
 
     const result = await pool.query(
-      `INSERT INTO orden_trabajo_folios (parque, cliente, usuarioactual)
-       VALUES ($1, $2, $3)
-       RETURNING numero;`,
-      [parque || null, cliente || null, usuarioactual || "UsuarioNodeJS"]
+      `INSERT INTO orden_trabajo_folios
+        (parque, cliente, telefono, fecha, factura_or, razon_social, rfc,
+         calle_numero, colonia, estado_municipio, mail,
+         tipo_emisiones, tipo_fisico, tipo_estatal,
+         total, vehiculos, usuarioactual)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       RETURNING *;`,
+      [
+        parque || null, cliente || null, telefono || null, fecha || null,
+        facturaOR || null, razonSocial || null, rfc || null,
+        calleNumero || null, colonia || null, estadoMunicipio || null, mail || null,
+        !!tipoEmisiones, !!tipoFisico, !!tipoEstatal,
+        total ?? null, JSON.stringify(vehiculos || []), usuarioactual || "UsuarioNodeJS"
+      ]
     );
 
-    const numero = result.rows[0].numero;
-    const folio = "F" + String(numero).padStart(6, "0");
+    const orden = result.rows[0];
+    const folio = "F" + String(orden.numero).padStart(6, "0");
 
-    res.json({ numero, folio });
+    res.json({ numero: orden.numero, folio, orden });
   } catch (error) {
     console.error("Error al asignar folio de orden de trabajo:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔹 Listar Órdenes de Trabajo ya generadas (para consultarlas / reimprimirlas)
+app.get("/orden-trabajo", verificarApiKey, async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM orden_trabajo_folios ORDER BY numero DESC;`);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error al listar órdenes de trabajo:", error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -24,12 +24,26 @@ async function main() {
         numero SERIAL PRIMARY KEY,
         parque TEXT,
         cliente TEXT,
+        telefono TEXT,
+        fecha DATE,
+        factura_or TEXT,
+        razon_social TEXT,
+        rfc TEXT,
+        calle_numero TEXT,
+        colonia TEXT,
+        estado_municipio TEXT,
+        mail TEXT,
+        tipo_emisiones BOOLEAN DEFAULT false,
+        tipo_fisico BOOLEAN DEFAULT false,
+        tipo_estatal BOOLEAN DEFAULT false,
+        total NUMERIC,
+        vehiculos JSONB NOT NULL DEFAULT '[]',
         usuarioactual TEXT,
         creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
     await client.query("COMMIT");
-    console.log("OK: tabla 'orden_trabajo_folios' creada (o ya existía). El folio F###### sale de la columna 'numero' (SERIAL, atomico, nunca se reinicia).");
+    console.log("OK: tabla 'orden_trabajo_folios' creada (o ya existía). El folio F###### sale de 'numero' (SERIAL, atomico, nunca se reinicia). Guarda la orden completa (vehiculos incluido) para poder reimprimir.");
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("ERROR:", err.message);
