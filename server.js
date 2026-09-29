@@ -3,25 +3,84 @@ import cors from "cors";
 import compression from "compression";
 import pkg from "pg";
 import dotenv from "dotenv";
+import { initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 
 dotenv.config();
 const { Pool } = pkg;
 
+// 🔒 Sin API_KEY en el .env no arranca (antes caía a una clave conocida)
+const API_KEY = process.env.API_KEY;
+if (!API_KEY) {
+  console.error("❌ Falta API_KEY en el .env, el servidor no arranca");
+  process.exit(1);
+}
+
+// 🔒 Firebase solo para verificar el token del usuario logueado (no requiere credenciales)
+initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || "verificadora-2909f" });
+const firebaseAuth = getAuth();
+
+// 🔒 CORS: si CORS_ORIGINS viene en el .env (separado por comas), solo esos origenes pueden llamar la API
+const corsOrigins = (process.env.CORS_ORIGINS || "").split(",").map(o => o.trim()).filter(Boolean);
+
 const app = express();
-app.use(cors());
+app.disable("x-powered-by");
+app.use(cors(corsOrigins.length ? { origin: corsOrigins } : undefined));
 app.use(compression());
 app.use(express.json());
-const API_KEY = process.env.API_KEY || "mi_clave_secreta";
 
-const verificarApiKey = (req, res, next) => {
+// 🔒 Pide la API key Y el token de Firebase del usuario logueado
+const verificarApiKey = async (req, res, next) => {
   const key = req.headers["x-api-key"];
 
   if (!key || key !== API_KEY) {
     return res.status(403).json({ error: "No autorizado" });
   }
 
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!token) {
+    return res.status(401).json({ error: "Sesión requerida" });
+  }
+
+  try {
+    req.user = await firebaseAuth.verifyIdToken(token);
+  } catch {
+    return res.status(401).json({ error: "Sesión inválida o expirada" });
+  }
+
   next();
 };
+
+// 🔒 Solo se aceptan nombres de columna que existan de verdad en la tabla
+// (evita que manden SQL disfrazado de nombre de columna)
+const IDENTIFICADOR_VALIDO = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const columnasPorTabla = {};
+
+async function cargarColumnas() {
+  const r = await pool.query(
+    `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
+  );
+  for (const k of Object.keys(columnasPorTabla)) delete columnasPorTabla[k];
+  for (const { table_name, column_name } of r.rows) {
+    (columnasPorTabla[table_name] ??= new Set()).add(column_name.toLowerCase());
+  }
+}
+
+async function validarColumnas(tabla, columnas) {
+  const esValida = (c) => IDENTIFICADOR_VALIDO.test(c) && columnasPorTabla[tabla]?.has(c.toLowerCase());
+
+  if (!columnas.every(esValida)) {
+    // puede que se haya agregado una columna nueva: recargar una vez antes de rechazar
+    await cargarColumnas();
+  }
+
+  const invalidas = columnas.filter(c => !esValida(c));
+  if (invalidas.length > 0) {
+    const err = new Error(`Columnas no permitidas: ${invalidas.join(", ")}`);
+    err.status = 400;
+    throw err;
+  }
+}
 
 async function guardarConReglas(data) {
   console.log('datos -------------', data);
@@ -69,6 +128,7 @@ async function guardarConReglas(data) {
 
   // ✅ filtrar columnas
   const columnas = Object.keys(data).filter(col => !columnasExcluir.includes(col));
+  await validarColumnas('registros', columnas);
   const valores = columnas.map(col => data[col]);
 
   const setClause = columnas
@@ -148,6 +208,8 @@ async function getTabla(tabla, filters = {}) {
   const values = [];
   const condiciones = [];
 
+  await validarColumnas(tabla, Object.keys(igualdad));
+
   Object.keys(igualdad).forEach((k) => {
     values.push(igualdad[k]);
     condiciones.push(`${k} = $${values.length}`);
@@ -174,6 +236,7 @@ async function getTabla(tabla, filters = {}) {
 async function insertTabla(tabla, data) {
 
   const columnas = Object.keys(data);
+  await validarColumnas(tabla, columnas);
   const valores = Object.values(data);
   const placeholders = columnas.map((_, i) => `$${i + 1}`);
   const updates = columnas.map(col => `${col} = EXCLUDED.${col}`);
@@ -261,7 +324,7 @@ app.get("/api/:tabla", verificarApiKey, async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -288,7 +351,7 @@ app.post("/api/:tabla",verificarApiKey, async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -305,7 +368,7 @@ app.put("/api/:tabla/:id", verificarApiKey, async (req, res) => {
     res.json({ mensaje: "Registro actualizado", registro: row });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -316,6 +379,8 @@ async function updateTabla(tabla, id, data) {
   if (columnas.length === 0) {
     throw new Error("No hay datos para actualizar");
   }
+
+  await validarColumnas(tabla, columnas);
 
   const setClause = columnas
     .map((col, i) => `${col} = $${i + 1}`)
@@ -359,6 +424,8 @@ app.put("/registrofederal/:id", verificarApiKey, async (req, res) => {
       return res.status(400).json({ error: "No hay datos para actualizar" });
     }
 
+    await validarColumnas('registrofederal', columnas);
+
     const setClause = columnas.map((col, i) => `${col} = $${i + 1}`).join(", ");
     const result = await pool.query(
       `UPDATE registrofederal SET ${setClause} WHERE id = $${columnas.length + 1} RETURNING *;`,
@@ -372,7 +439,7 @@ app.put("/registrofederal/:id", verificarApiKey, async (req, res) => {
     res.json({ mensaje: "Registro federal actualizado", registro: result.rows[0] });
   } catch (error) {
     console.error("Error al actualizar registro federal:", error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -582,4 +649,6 @@ app.get("/orden-trabajo", verificarApiKey, async (req, res) => {
 
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`));
+cargarColumnas()
+  .catch(err => console.error("⚠️ No se pudieron cargar las columnas al arrancar (se reintenta en la primera peticion):", err.message))
+  .finally(() => app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`)));
