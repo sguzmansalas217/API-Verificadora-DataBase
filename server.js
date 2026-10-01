@@ -599,7 +599,7 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
     const {
       tipoOrden, parque, cliente, telefono, fecha, facturaOR, razonSocial, rfc,
       calleNumero, colonia, estadoMunicipio, mail,
-      tipoEmisiones, tipoFisico, tipoEstatal,
+      certFisico, certEmisiones1, certEmisiones2,
       total, vehiculos, usuarioactual
     } = req.body;
 
@@ -613,7 +613,7 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
       `INSERT INTO orden_trabajo_folios
         (tipo, numero, parque, cliente, telefono, fecha, factura_or, razon_social, rfc,
          calle_numero, colonia, estado_municipio, mail,
-         tipo_emisiones, tipo_fisico, tipo_estatal,
+         cert_fisico, cert_emisiones1, cert_emisiones2,
          total, vehiculos, usuarioactual)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING *;`,
@@ -621,7 +621,7 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
         tipo, numero, parque || null, cliente || null, telefono || null, fecha || null,
         facturaOR || null, razonSocial || null, rfc || null,
         calleNumero || null, colonia || null, estadoMunicipio || null, mail || null,
-        !!tipoEmisiones, !!tipoFisico, !!tipoEstatal,
+        !!certFisico, !!certEmisiones1, !!certEmisiones2,
         total ?? null, JSON.stringify(vehiculos || []), usuarioactual || "UsuarioNodeJS"
       ]
     );
