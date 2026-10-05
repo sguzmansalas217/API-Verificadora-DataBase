@@ -647,6 +647,141 @@ app.get("/orden-trabajo", verificarApiKey, async (req, res) => {
   }
 });
 
+// Columnas de cada vehiculo que se pueden editar desde una orden y propagar a su tabla de origen.
+// Nunca se usan nombres de columna que vengan del request: solo los de esta whitelist.
+const COLUMNAS_EDITABLES_VEHICULO = {
+  federal: ["fisico", "emisiones1", "emisiones2"],
+  estatal: ["nota", "certificado", "multa", "costo", "referencia", "nombrecliente"],
+};
+const TABLA_ORIGEN_POR_TIPO = { federal: "registrofederal", estatal: "registros" };
+const COLUMNAS_NUMERICAS_VEHICULO = ["multa", "costo", "certificado"];
+
+// Busca un vehiculo por placa en su tabla de origen. Devuelve { vehiculo } o { error, status }.
+async function buscarVehiculoOrden(db, tipo, placa, parque) {
+  if (tipo === "federal") {
+    const r = await db.query(
+      `SELECT id, placa, parque, fisico, emisiones1, emisiones2
+         FROM registrofederal WHERE upper(btrim(placa)) = upper(btrim($1)) ORDER BY id DESC;`,
+      [placa]
+    );
+    if (r.rows.length === 0) return { status: 404, error: "Placa no encontrada en Datos Federales" };
+    if (parque) {
+      const mismoParque = r.rows.find(v => v.parque === parque);
+      if (!mismoParque) return { status: 409, error: `La placa pertenece a otro parque (${r.rows[0].parque})` };
+      return { vehiculo: mismoParque };
+    }
+    return { vehiculo: r.rows[0] };
+  }
+
+  const r = await db.query(
+    `SELECT id, placa, nota, certificado, multa, costo, referencia, nombrecliente
+       FROM registros WHERE upper(btrim(placa)) = upper(btrim($1))
+      ORDER BY (porhacer = 'SI') DESC, fecharegistro DESC, id DESC LIMIT 1;`,
+    [placa]
+  );
+  if (r.rows.length === 0) return { status: 404, error: "Placa no encontrada en registros estatales" };
+  return { vehiculo: r.rows[0] };
+}
+
+// 🔹 Buscar un vehiculo por placa para agregarlo a una orden existente
+app.get("/orden-trabajo/buscar-vehiculo", verificarApiKey, async (req, res) => {
+  try {
+    const { tipo, placa, parque } = req.query;
+    if (!TIPOS_ORDEN_VALIDOS.includes(tipo)) return res.status(400).json({ error: "Tipo de orden no valido" });
+    if (!placa || !placa.trim()) return res.status(400).json({ error: "Falta la placa" });
+
+    const resultado = await buscarVehiculoOrden(pool, tipo, placa, parque || null);
+    if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+    res.json(resultado.vehiculo);
+  } catch (error) {
+    console.error("Error al buscar vehiculo para orden:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔹 Editar una Orden de Trabajo existente (mismo folio) y propagar cambios de vehiculos a su tabla de origen
+app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
+  const { tipo, numero } = req.params;
+  if (!TIPOS_ORDEN_VALIDOS.includes(tipo)) return res.status(400).json({ error: "Tipo de orden no valido" });
+
+  const {
+    cliente, telefono, fecha, facturaOR, razonSocial, rfc,
+    calleNumero, colonia, estadoMunicipio, mail,
+    certFisico, certEmisiones1, certEmisiones2,
+    total, vehiculos, cambiosVehiculos
+  } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const ordenResult = await client.query(
+      `UPDATE orden_trabajo_folios SET
+         cliente = $3, telefono = $4, fecha = $5, factura_or = $6, razon_social = $7, rfc = $8,
+         calle_numero = $9, colonia = $10, estado_municipio = $11, mail = $12,
+         cert_fisico = $13, cert_emisiones1 = $14, cert_emisiones2 = $15,
+         total = $16, vehiculos = $17
+       WHERE tipo = $1 AND numero = $2
+       RETURNING *;`,
+      [
+        tipo, numero, cliente || null, telefono || null, fecha || null, facturaOR || null,
+        razonSocial || null, rfc || null, calleNumero || null, colonia || null,
+        estadoMunicipio || null, mail || null,
+        !!certFisico, !!certEmisiones1, !!certEmisiones2,
+        total ?? null, JSON.stringify(vehiculos || [])
+      ]
+    );
+
+    if (ordenResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Orden no encontrada" });
+    }
+
+    const orden = ordenResult.rows[0];
+    const tablaOrigen = TABLA_ORIGEN_POR_TIPO[tipo];
+    const columnasPermitidas = COLUMNAS_EDITABLES_VEHICULO[tipo];
+    const noActualizados = [];
+
+    for (const item of cambiosVehiculos || []) {
+      const cambios = item?.cambios || {};
+      const columnas = Object.keys(cambios).filter(c => columnasPermitidas.includes(c));
+      if (columnas.length === 0) continue;
+
+      let idVehiculo = item.id;
+      if (!idVehiculo) {
+        const encontrado = await buscarVehiculoOrden(client, tipo, item.placa || "", tipo === "federal" ? orden.parque : null);
+        idVehiculo = encontrado.vehiculo?.id;
+      }
+      if (!idVehiculo) {
+        noActualizados.push(item.placa);
+        continue;
+      }
+
+      const valores = columnas.map(c => {
+        const v = cambios[c];
+        if (COLUMNAS_NUMERICAS_VEHICULO.includes(c) && (v === "" || v === undefined)) return null;
+        return typeof v === "string" ? v.trim() : v;
+      });
+      const setClause = columnas.map((c, i) => `${c} = $${i + 1}`).join(", ");
+
+      const upd = await client.query(
+        `UPDATE ${tablaOrigen} SET ${setClause} WHERE id = $${columnas.length + 1};`,
+        [...valores, idVehiculo]
+      );
+      if (upd.rowCount === 0) noActualizados.push(item.placa);
+    }
+
+    await client.query("COMMIT");
+    res.json({ orden, noActualizados });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error al editar orden de trabajo:", error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
 cargarColumnas()
