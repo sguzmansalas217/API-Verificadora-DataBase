@@ -410,6 +410,12 @@ app.get("/registrofederal", verificarApiKey, async (req, res) => {
   }
 });
 
+// Fecha de hoy en hora de Mexico (el contenedor de Postgres corre en UTC, CURRENT_DATE
+// cambiaria de dia a las 6pm). Se usa como fecharegistro de un vehiculo federal cada vez
+// que se registra o se le actualiza un folio.
+const FECHA_HOY_SQL = "(now() AT TIME ZONE 'America/Mexico_City')::date";
+const COLUMNAS_FOLIO_FEDERAL = ["fisico", "emisiones1", "emisiones2"];
+
 // 🔹 Actualizar registro federal por id
 app.put("/registrofederal/:id", verificarApiKey, async (req, res) => {
   try {
@@ -417,16 +423,28 @@ app.put("/registrofederal/:id", verificarApiKey, async (req, res) => {
     const data = { ...req.body };
     delete data.id;
 
-    const columnas = Object.keys(data);
-    const valores  = Object.values(data);
-
-    if (columnas.length === 0) {
+    if (Object.keys(data).length === 0) {
       return res.status(400).json({ error: "No hay datos para actualizar" });
     }
 
-    await validarColumnas('registrofederal', columnas);
+    await validarColumnas('registrofederal', Object.keys(data));
 
-    const setClause = columnas.map((col, i) => `${col} = $${i + 1}`).join(", ");
+    // Si cambia algun folio, la fecha de registro pasa a ser la de hoy.
+    const actual = await pool.query(`SELECT fisico, emisiones1, emisiones2 FROM registrofederal WHERE id = $1`, [id]);
+    if (actual.rows.length === 0) {
+      return res.status(404).json({ error: "Registro no encontrado" });
+    }
+    const normalizar = v => (v ?? "").toString().trim();
+    const cambioFolio = COLUMNAS_FOLIO_FEDERAL.some(
+      c => c in data && normalizar(data[c]) !== normalizar(actual.rows[0][c])
+    );
+    if (cambioFolio) delete data.fecharegistro;
+
+    const columnas = Object.keys(data);
+    const valores  = Object.values(data);
+    const asignaciones = columnas.map((col, i) => `${col} = $${i + 1}`);
+    if (cambioFolio) asignaciones.push(`fecharegistro = ${FECHA_HOY_SQL}`);
+    const setClause = asignaciones.join(", ");
     const result = await pool.query(
       `UPDATE registrofederal SET ${setClause} WHERE id = $${columnas.length + 1} RETURNING *;`,
       [...valores, id]
@@ -467,8 +485,8 @@ app.post("/registrofederal-guardar", verificarApiKey, async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO registrofederal (parque, placa, noserie, marca, tipo, ejes, modelo, propietario, combustible, fisico, emisiones1, emisiones2, usuarioactual)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO registrofederal (parque, placa, noserie, marca, tipo, ejes, modelo, propietario, combustible, fisico, emisiones1, emisiones2, usuarioactual, fecharegistro)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, ${FECHA_HOY_SQL})
        RETURNING *;`,
       [Parque, Placa, NoSerie, Marca, Tipo, Ejes, Modelo, Propietario, Combustible, Fisico || null, Emisiones1 || null, Emisiones2 || null, UsuarioActual || "UsuarioNodeJS"]
     );
@@ -561,7 +579,7 @@ app.post("/registrofederal-folio", verificarApiKey, async (req, res) => {
     }
 
     const actualizado = await pool.query(
-      `UPDATE registrofederal SET ${columna} = $1, nombre = $2 WHERE id = $3 RETURNING *;`,
+      `UPDATE registrofederal SET ${columna} = $1, nombre = $2, fecharegistro = ${FECHA_HOY_SQL} WHERE id = $3 RETURNING *;`,
       [folioNorm, nombreNorm, vehiculo.id]
     );
 
@@ -762,7 +780,10 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
         if (COLUMNAS_NUMERICAS_VEHICULO.includes(c) && (v === "" || v === undefined)) return null;
         return typeof v === "string" ? v.trim() : v;
       });
-      const setClause = columnas.map((c, i) => `${c} = $${i + 1}`).join(", ");
+      const asignaciones = columnas.map((c, i) => `${c} = $${i + 1}`);
+      // En Federal todas las columnas editables son folios: actualizar fecha de registro a hoy.
+      if (tipo === "federal") asignaciones.push(`fecharegistro = ${FECHA_HOY_SQL}`);
+      const setClause = asignaciones.join(", ");
 
       const upd = await client.query(
         `UPDATE ${tablaOrigen} SET ${setClause} WHERE id = $${columnas.length + 1};`,
