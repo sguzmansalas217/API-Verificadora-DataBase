@@ -107,10 +107,25 @@ async function guardarConReglas(data) {
     return "omitido";
   }
 
-  // 🔍 Buscar si existe
+  // Un alta de Por Hacer siempre es un trabajo nuevo: nunca debe sobrescribir un registro
+  // anterior de la misma placa (antes lo pisaba y lo dejaba sin porhacer = 'SI').
+  if (data.porhacer === 'SI') {
+    await insertTabla('registros', data);
+    return "insertado";
+  }
+
+  // 🔍 Buscar el registro mas reciente de la placa dentro de la misma ventana de 25 dias.
+  // Solo se actualiza ese (por id); antes se actualizaban TODOS los registros historicos
+  // de la placa, perdiendo su nota y fecha originales.
+  const limite = new Date(fechaNueva);
+  limite.setDate(limite.getDate() - 25);
+  const limiteStr = `${limite.getFullYear()}-${String(limite.getMonth() + 1).padStart(2, '0')}-${String(limite.getDate()).padStart(2, '0')}`;
+
   const existe = await pool.query(
-    `SELECT * FROM registros WHERE placa = $1 LIMIT 1`,
-    [placa]
+    `SELECT id FROM registros
+      WHERE placa = $1 AND fecharegistro >= $2
+      ORDER BY fecharegistro DESC, id DESC LIMIT 1`,
+    [placa, limiteStr]
   );
 
   // 🟢 INSERT
@@ -136,13 +151,12 @@ async function guardarConReglas(data) {
     .join(", ");
 
   const query = `
-    UPDATE registros 
+    UPDATE registros
     SET ${setClause}
-    WHERE placa = $${columnas.length + 1}
+    WHERE id = $${columnas.length + 1}
   `;
 
-
-  await pool.query(query, [...valores, placa]);
+  await pool.query(query, [...valores, existe.rows[0].id]);
 
   return "actualizado";
 }
