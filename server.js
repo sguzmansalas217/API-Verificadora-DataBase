@@ -139,9 +139,12 @@ async function guardarConReglas(data) {
   // 🟡 UPDATE DINÁMICO (TODOS LOS CAMPOS)
 
   // ❌ columnas que NO quieres que se modifiquen.
-  // fecharegistro: el registro ya existe, conserva la fecha con la que se creo. Antes una
-  // nota capturada dias despues (o un Excel posterior) le cambiaba la fecha de registro.
-  const columnasExcluir = ['porhacer', 'referencia', 'referencia2', 'fecharegistro'];
+  // fecharegistro: la que manda es la del Excel (viene de la maquina de verificacion), asi
+  // que el Excel siempre la sobrescribe. Una captura manual (Notas) NO la cambia en un
+  // registro existente; antes una nota capturada dias despues movia la fecha.
+  const esExcel = data.usuarioactual === 'Excel';
+  const columnasExcluir = ['porhacer', 'referencia', 'referencia2'];
+  if (!esExcel) columnasExcluir.push('fecharegistro');
 
   // ✅ filtrar columnas
   const columnas = Object.keys(data).filter(col => !columnasExcluir.includes(col));
