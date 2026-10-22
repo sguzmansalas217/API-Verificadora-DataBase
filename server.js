@@ -429,6 +429,33 @@ app.get("/registrofederal", verificarApiKey, async (req, res) => {
   }
 });
 
+// 🔹 Certificados federales: una fila por folio vigente (fisico, emisiones 1 y 2) de cada vehiculo.
+// La fecha y el nombre salen de la captura del folio en registrofederal_folios; si el folio se
+// edito directo en la tabla y no tiene captura, se usa la fecha de registro del vehiculo.
+app.get("/registrofederal-certificados", verificarApiKey, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT rf.id || '-' || c.columna AS id,
+             rf.placa, rf.parque, c.columna AS tipo, btrim(c.folio) AS folio,
+             COALESCE(h.nombre, rf.nombre) AS nombre,
+             to_char(COALESCE(h.fecha, rf.fecharegistro), 'YYYY-MM-DD') AS fecha
+      FROM registrofederal rf
+      CROSS JOIN LATERAL (VALUES ('fisico', rf.fisico), ('emisiones1', rf.emisiones1), ('emisiones2', rf.emisiones2)) AS c(columna, folio)
+      LEFT JOIN LATERAL (
+        SELECT f.fecha, f.nombre FROM registrofederal_folios f
+        WHERE f.registrofederal_id = rf.id AND f.folio = upper(btrim(c.folio))
+        ORDER BY f.created_at DESC LIMIT 1
+      ) h ON true
+      WHERE NULLIF(btrim(c.folio), '') IS NOT NULL
+      ORDER BY fecha DESC, rf.placa;
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error al obtener certificados federales:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Fecha de hoy en hora de Mexico (el contenedor de Postgres corre en UTC, CURRENT_DATE
 // cambiaria de dia a las 6pm). Se usa como fecharegistro de un vehiculo federal cada vez
 // que se registra o se le actualiza un folio.
