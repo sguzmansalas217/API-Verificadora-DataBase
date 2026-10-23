@@ -143,16 +143,27 @@ async function guardarConReglas(data) {
   // que el Excel siempre la sobrescribe. Una captura manual (Notas) NO la cambia en un
   // registro existente; antes una nota capturada dias despues movia la fecha.
   const esExcel = data.usuarioactual === 'Excel';
-  const columnasExcluir = ['porhacer', 'referencia', 'referencia2'];
+  const columnasExcluir = ['porhacer'];
   if (!esExcel) columnasExcluir.push('fecharegistro');
 
+  // referencia / referencia2 solo se llenan si el registro las tiene vacias: asi una nota
+  // capturada despues del Excel deja su referencia, pero no pisa la que ya se capturo
+  // (por ejemplo en Por Hacer). Antes nunca se actualizaban y quedaban vacias.
+  const COLUMNAS_SOLO_SI_VACIA = ['referencia', 'referencia2'];
+  const tieneValor = v => v !== null && v !== undefined && v.toString().trim() !== '';
+
   // ✅ filtrar columnas
-  const columnas = Object.keys(data).filter(col => !columnasExcluir.includes(col));
+  const columnas = Object.keys(data).filter(col =>
+    !columnasExcluir.includes(col) &&
+    (!COLUMNAS_SOLO_SI_VACIA.includes(col) || tieneValor(data[col]))
+  );
   await validarColumnas('registros', columnas);
   const valores = columnas.map(col => data[col]);
 
   const setClause = columnas
-    .map((col, i) => `${col} = $${i + 1}`)
+    .map((col, i) => COLUMNAS_SOLO_SI_VACIA.includes(col)
+      ? `${col} = COALESCE(NULLIF(btrim(${col}), ''), $${i + 1})`
+      : `${col} = $${i + 1}`)
     .join(", ");
 
   const query = `
