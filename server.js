@@ -5,6 +5,7 @@ import pkg from "pg";
 import dotenv from "dotenv";
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { crearTablasCertificados, registrarRutasCertificados } from "./certificadosEstatales.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -27,6 +28,8 @@ const app = express();
 app.disable("x-powered-by");
 app.use(cors(corsOrigins.length ? { origin: corsOrigins } : undefined));
 app.use(compression());
+// Las imagenes de certificados llegan en base64 y pasan el limite de 100kb por defecto.
+app.use("/certificados-estatales", express.json({ limit: "5mb" }));
 app.use(express.json());
 
 // 🔒 Pide la API key Y el token de Firebase del usuario logueado
@@ -860,8 +863,12 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
   }
 });
 
+registrarRutasCertificados(app, { pool, verificarApiKey });
+
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
-cargarColumnas()
+crearTablasCertificados(pool)
+  .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados estatales:", err.message))
+  .then(() => cargarColumnas())
   .catch(err => console.error("⚠️ No se pudieron cargar las columnas al arrancar (se reintenta en la primera peticion):", err.message))
   .finally(() => app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`)));
