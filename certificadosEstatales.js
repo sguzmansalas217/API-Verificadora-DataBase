@@ -13,8 +13,13 @@ const PRECIOS = {
   "claude-opus-5-5": [4, 20],
 };
 
-const USUARIOS = (process.env.CERTIFICADOS_USUARIOS || "sguzmansalas217@gmail.com")
-  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const listaCorreos = (valor) => valor.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+// Administradores: suben, eliminan y ven costos. Lectores: solo buscan, ven y descargan.
+const ADMINISTRADORES = listaCorreos(process.env.CERTIFICADOS_USUARIOS || "sguzmansalas217@gmail.com");
+const LECTORES = listaCorreos(process.env.CERTIFICADOS_LECTORES || "robertomuniz1096@gmail.com");
+
+const esAdministrador = (req) => ADMINISTRADORES.includes((req.user?.email || "").toLowerCase());
+const esLector = (req) => esAdministrador(req) || LECTORES.includes((req.user?.email || "").toLowerCase());
 
 const TIPOS_IMAGEN = ["image/webp", "image/jpeg", "image/png"];
 
@@ -85,16 +90,13 @@ function motivosRevision(c) {
 }
 
 export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
-  const soloUsuariosPermitidos = (req, res, next) => {
-    if (!USUARIOS.includes((req.user?.email || "").toLowerCase())) {
-      return res.status(403).json({ error: "Sin acceso a certificados estatales" });
-    }
-    next();
-  };
-  const proteger = [verificarApiKey, soloUsuariosPermitidos];
+  const exigir = (permitido) => (req, res, next) =>
+    permitido(req) ? next() : res.status(403).json({ error: "Sin acceso a certificados estatales" });
+  const soloAdministradores = [verificarApiKey, exigir(esAdministrador)];
+  const lectores = [verificarApiKey, exigir(esLector)];
 
   // Lee una imagen de certificado y la guarda. Body: { imagen (base64), tipo, archivo, pagina }
-  app.post("/certificados-estatales", ...proteger, async (req, res) => {
+  app.post("/certificados-estatales", ...soloAdministradores, async (req, res) => {
     const anthropic = clienteAnthropic();
     if (!anthropic) return res.status(503).json({ error: "Falta ANTHROPIC_API_KEY en el .env de la API" });
 
@@ -164,7 +166,7 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
   });
 
   // Lista / busca (?q= en placa, nombre, certificado o serie). No incluye la imagen.
-  app.get("/certificados-estatales", ...proteger, async (req, res) => {
+  app.get("/certificados-estatales", ...lectores, async (req, res) => {
     try {
       const q = (req.query.q || "").toString().trim();
       const result = await pool.query(
@@ -179,14 +181,18 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
          LIMIT 500`,
         [q]
       );
-      res.json(result.rows);
+      // Los lectores no ven costos ni datos internos de la carga.
+      const filas = esAdministrador(req)
+        ? result.rows
+        : result.rows.map(({ costo_usd, usuarioactual, archivo_pdf, pagina, ...resto }) => resto);
+      res.json(filas);
     } catch (error) {
       console.error("Error al buscar certificados estatales:", error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.get("/certificados-estatales/:id/imagen", ...proteger, async (req, res) => {
+  app.get("/certificados-estatales/:id/imagen", ...lectores, async (req, res) => {
     try {
       const r = await pool.query(
         `SELECT tipo, imagen FROM certificados_estatales_imagen WHERE certificado_id = $1`,
@@ -202,7 +208,7 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
     }
   });
 
-  app.delete("/certificados-estatales/:id", ...proteger, async (req, res) => {
+  app.delete("/certificados-estatales/:id", ...soloAdministradores, async (req, res) => {
     try {
       const r = await pool.query(`DELETE FROM certificados_estatales WHERE id = $1`, [req.params.id]);
       if (r.rowCount === 0) return res.status(404).json({ error: "Certificado no encontrado" });
