@@ -14,18 +14,18 @@ const PRECIOS = {
 };
 
 const listaCorreos = (valor) => valor.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-// Administradores: suben, eliminan y ven costos. Lectores: solo buscan, ven y descargan.
+// Administradores: suben, eliminan y ven costos. Cualquier usuario con sesion puede buscar,
+// ver y descargar (verificarApiKey ya exige la sesion).
 const ADMINISTRADORES = listaCorreos(process.env.CERTIFICADOS_USUARIOS || "sguzmansalas217@gmail.com");
-const LECTORES = listaCorreos(process.env.CERTIFICADOS_LECTORES || "robertomuniz1096@gmail.com");
 
 // Usuarios que pueden subir para probar, con un tope de certificados (no ven costos ni eliminan).
 const SUBIDA_LIMITADA = listaCorreos(process.env.CERTIFICADOS_SUBIDA_LIMITADA || "robertomuniz1096@gmail.com");
-const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 100;
+const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 200;
 
 const correo = (req) => (req.user?.email || "").toLowerCase();
 const esAdministrador = (req) => ADMINISTRADORES.includes(correo(req));
 const tieneSubidaLimitada = (req) => !esAdministrador(req) && SUBIDA_LIMITADA.includes(correo(req));
-const esLector = (req) => esAdministrador(req) || tieneSubidaLimitada(req) || LECTORES.includes(correo(req));
+const esLector = (req) => !!req.user;
 
 const TIPOS_IMAGEN = ["image/webp", "image/jpeg", "image/png"];
 
