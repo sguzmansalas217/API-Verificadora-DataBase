@@ -18,8 +18,14 @@ const listaCorreos = (valor) => valor.split(",").map(s => s.trim().toLowerCase()
 const ADMINISTRADORES = listaCorreos(process.env.CERTIFICADOS_USUARIOS || "sguzmansalas217@gmail.com");
 const LECTORES = listaCorreos(process.env.CERTIFICADOS_LECTORES || "robertomuniz1096@gmail.com");
 
-const esAdministrador = (req) => ADMINISTRADORES.includes((req.user?.email || "").toLowerCase());
-const esLector = (req) => esAdministrador(req) || LECTORES.includes((req.user?.email || "").toLowerCase());
+// Usuarios que pueden subir para probar, con un tope de certificados (no ven costos ni eliminan).
+const SUBIDA_LIMITADA = listaCorreos(process.env.CERTIFICADOS_SUBIDA_LIMITADA || "robertomuniz1096@gmail.com");
+const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 100;
+
+const correo = (req) => (req.user?.email || "").toLowerCase();
+const esAdministrador = (req) => ADMINISTRADORES.includes(correo(req));
+const tieneSubidaLimitada = (req) => !esAdministrador(req) && SUBIDA_LIMITADA.includes(correo(req));
+const esLector = (req) => esAdministrador(req) || tieneSubidaLimitada(req) || LECTORES.includes(correo(req));
 
 const TIPOS_IMAGEN = ["image/webp", "image/jpeg", "image/png"];
 
@@ -94,11 +100,39 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
     permitido(req) ? next() : res.status(403).json({ error: "Sin acceso a certificados estatales" });
   const soloAdministradores = [verificarApiKey, exigir(esAdministrador)];
   const lectores = [verificarApiKey, exigir(esLector)];
+  const quienesSuben = [verificarApiKey, exigir(req => esAdministrador(req) || tieneSubidaLimitada(req))];
+
+  const certificadosSubidos = async (req) => {
+    const r = await pool.query(`SELECT count(*)::int AS n FROM certificados_estatales WHERE lower(usuarioactual) = $1`, [correo(req)]);
+    return r.rows[0].n;
+  };
+
+  // Lo que puede hacer el usuario en la pantalla (la pantalla no decide sola).
+  app.get("/certificados-estatales/permisos", ...lectores, async (req, res) => {
+    try {
+      const admin = esAdministrador(req);
+      const limitado = tieneSubidaLimitada(req);
+      res.json({
+        puedeSubir: admin || limitado,
+        puedeEliminar: admin,
+        verCostos: admin,
+        limite: limitado ? LIMITE_PRUEBA : null,
+        usados: limitado ? await certificadosSubidos(req) : null,
+      });
+    } catch (error) {
+      console.error("Error al obtener permisos de certificados:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
 
   // Lee una imagen de certificado y la guarda. Body: { imagen (base64), tipo, archivo, pagina }
-  app.post("/certificados-estatales", ...soloAdministradores, async (req, res) => {
+  app.post("/certificados-estatales", ...quienesSuben, async (req, res) => {
     const anthropic = clienteAnthropic();
     if (!anthropic) return res.status(503).json({ error: "Falta ANTHROPIC_API_KEY en el .env de la API" });
+
+    if (tieneSubidaLimitada(req) && (await certificadosSubidos(req)) >= LIMITE_PRUEBA) {
+      return res.status(403).json({ error: `Llegaste al límite de ${LIMITE_PRUEBA} certificados de prueba`, limiteAlcanzado: true });
+    }
 
     const { imagen, tipo = "image/webp", archivo, pagina } = req.body;
     if (!imagen || !TIPOS_IMAGEN.includes(tipo)) {
@@ -155,7 +189,8 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
         [ins.rows[0].id, tipo, buffer.length, buffer]
       );
       await db.query("COMMIT");
-      res.json({ ...ins.rows[0], bytes: buffer.length });
+      const { costo_usd, ...sinCosto } = ins.rows[0];
+      res.json({ ...(esAdministrador(req) ? ins.rows[0] : sinCosto), bytes: buffer.length });
     } catch (error) {
       await db.query("ROLLBACK");
       console.error("Error al guardar certificado estatal:", error);
