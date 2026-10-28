@@ -6,7 +6,8 @@ import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 
 const MODELO = process.env.CERTIFICADOS_MODELO || "claude-haiku-5-5";
-// USD por millon de tokens (entrada, salida), para registrar el costo de cada lectura.
+// USD por millon de tokens (entrada, salida). El costo de cada lectura se guarda en la base
+// pero no se envia a la pantalla; se consulta con SQL.
 const PRECIOS = {
   "claude-haiku-5-5": [0.10, 0.50],
   "claude-sonnet-5-5": [2, 10],
@@ -14,11 +15,11 @@ const PRECIOS = {
 };
 
 const listaCorreos = (valor) => valor.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-// Administradores: suben, eliminan y ven costos. Cualquier usuario con sesion puede buscar,
+// Administradores: suben sin tope y eliminan. Cualquier usuario con sesion puede buscar,
 // ver y descargar (verificarApiKey ya exige la sesion).
 const ADMINISTRADORES = listaCorreos(process.env.CERTIFICADOS_USUARIOS || "sguzmansalas217@gmail.com");
 
-// Usuarios que pueden subir para probar, con un tope de certificados (no ven costos ni eliminan).
+// Usuarios que pueden subir para probar, con un tope de certificados (no eliminan).
 const SUBIDA_LIMITADA = listaCorreos(process.env.CERTIFICADOS_SUBIDA_LIMITADA || "robertomuniz1096@gmail.com");
 const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 200;
 
@@ -115,7 +116,6 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
       res.json({
         puedeSubir: admin || limitado,
         puedeEliminar: admin,
-        verCostos: admin,
         limite: limitado ? LIMITE_PRUEBA : null,
         usados: limitado ? await certificadosSubidos(req) : null,
       });
@@ -178,7 +178,7 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING id, certificado, certificado_repetido, placa, nombre, serie, marca,
                    to_char(fecha, 'YYYY-MM-DD') AS fecha, centro, revisar, motivo_revisar,
-                   archivo_pdf, pagina, costo_usd, created_at`,
+                   archivo_pdf, pagina, created_at`,
         [c.certificado, c.certificado_repetido, c.placa, c.nombre, c.serie, c.marca,
          /^\d{4}-\d{2}-\d{2}$/.test(c.fecha) ? c.fecha : null, c.centro,
          motivos.length > 0, motivos.join(", ") || null, archivo || null, pagina ?? null,
@@ -189,8 +189,7 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
         [ins.rows[0].id, tipo, buffer.length, buffer]
       );
       await db.query("COMMIT");
-      const { costo_usd, ...sinCosto } = ins.rows[0];
-      res.json({ ...(esAdministrador(req) ? ins.rows[0] : sinCosto), bytes: buffer.length });
+      res.json({ ...ins.rows[0], bytes: buffer.length });
     } catch (error) {
       await db.query("ROLLBACK");
       console.error("Error al guardar certificado estatal:", error);
@@ -207,7 +206,7 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
       const result = await pool.query(
         `SELECT c.id, c.certificado, c.certificado_repetido, c.placa, c.nombre, c.serie, c.marca,
                 to_char(c.fecha, 'YYYY-MM-DD') AS fecha, c.centro, c.revisar, c.motivo_revisar,
-                c.archivo_pdf, c.pagina, c.costo_usd, c.usuarioactual, c.created_at, i.bytes, i.tipo
+                c.archivo_pdf, c.pagina, c.usuarioactual, c.created_at, i.bytes, i.tipo
          FROM certificados_estatales c
          LEFT JOIN certificados_estatales_imagen i ON i.certificado_id = c.id
          WHERE $1 = '' OR c.placa ILIKE '%' || $1 || '%' OR c.nombre ILIKE '%' || $1 || '%'
@@ -216,10 +215,10 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
          LIMIT 500`,
         [q]
       );
-      // Los lectores no ven costos ni datos internos de la carga.
+      // Solo el administrador recibe los datos internos de la carga.
       const filas = esAdministrador(req)
         ? result.rows
-        : result.rows.map(({ costo_usd, usuarioactual, archivo_pdf, pagina, ...resto }) => resto);
+        : result.rows.map(({ usuarioactual, archivo_pdf, pagina, ...resto }) => resto);
       res.json(filas);
     } catch (error) {
       console.error("Error al buscar certificados estatales:", error);
