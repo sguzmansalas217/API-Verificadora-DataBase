@@ -203,17 +203,25 @@ export function registrarRutasCertificados(app, { pool, verificarApiKey }) {
   app.get("/certificados-estatales", ...lectores, async (req, res) => {
     try {
       const q = (req.query.q || "").toString().trim();
+      // Filtros por columna de la pantalla; las fechas solo se aceptan como YYYY-MM-DD.
+      const texto = (k) => (req.query[k] || "").toString().trim();
+      const fecha = (k) => (/^\d{4}-\d{2}-\d{2}$/.test(texto(k)) ? texto(k) : "");
       const result = await pool.query(
         `SELECT c.id, c.certificado, c.certificado_repetido, c.placa, c.nombre, c.serie, c.marca,
                 to_char(c.fecha, 'YYYY-MM-DD') AS fecha, c.centro, c.revisar, c.motivo_revisar,
                 c.archivo_pdf, c.pagina, c.usuarioactual, c.created_at, i.bytes, i.tipo
          FROM certificados_estatales c
          LEFT JOIN certificados_estatales_imagen i ON i.certificado_id = c.id
-         WHERE $1 = '' OR c.placa ILIKE '%' || $1 || '%' OR c.nombre ILIKE '%' || $1 || '%'
-            OR c.certificado ILIKE '%' || $1 || '%' OR c.serie ILIKE '%' || $1 || '%'
+         WHERE ($1 = '' OR c.placa ILIKE '%' || $1 || '%' OR c.nombre ILIKE '%' || $1 || '%'
+                OR c.certificado ILIKE '%' || $1 || '%' OR c.serie ILIKE '%' || $1 || '%')
+           AND ($2 = '' OR c.certificado ILIKE '%' || $2 || '%')
+           AND ($3 = '' OR c.placa ILIKE '%' || $3 || '%')
+           AND ($4 = '' OR c.centro ILIKE '%' || $4 || '%')
+           AND ($5 = '' OR c.fecha >= NULLIF($5, '')::date)
+           AND ($6 = '' OR c.fecha <= NULLIF($6, '')::date)
          ORDER BY c.id DESC
          LIMIT 500`,
-        [q]
+        [q, texto("certificado"), texto("placa"), texto("centro"), fecha("desde"), fecha("hasta")]
       );
       // Solo el administrador recibe los datos internos de la carga.
       const filas = esAdministrador(req)
