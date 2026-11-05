@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { crearTablasCertificados, registrarRutasCertificados } from "./certificadosEstatales.js";
+import { crearTablaPago, registrarRutasPago, sistemaSuspendido } from "./controlPago.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -49,6 +50,11 @@ const verificarApiKey = async (req, res, next) => {
     req.user = await firebaseAuth.verifyIdToken(token);
   } catch {
     return res.status(401).json({ error: "Sesión inválida o expirada" });
+  }
+
+  // 🔒 Pago vencido: se niega todo menos /pago/*, que la pantalla usa para mostrar el aviso.
+  if (!req.path.startsWith("/pago/") && await sistemaSuspendido(pool, req)) {
+    return res.status(423).json({ suspendido: true, error: "Sistema suspendido. Contacta al administrador." });
   }
 
   next();
@@ -864,11 +870,14 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
 });
 
 registrarRutasCertificados(app, { pool, verificarApiKey });
+registrarRutasPago(app, { pool, verificarApiKey });
 
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
 crearTablasCertificados(pool)
   .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados estatales:", err.message))
+  .then(() => crearTablaPago(pool))
+  .catch(err => console.error("⚠️ No se pudo crear la tabla de control de pago:", err.message))
   .then(() => cargarColumnas())
   .catch(err => console.error("⚠️ No se pudieron cargar las columnas al arrancar (se reintenta en la primera peticion):", err.message))
   .finally(() => app.listen(PORT, () => console.log(`✅ API corriendo en http://localhost:${PORT}`)));
