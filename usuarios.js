@@ -9,6 +9,12 @@ const DURACION_SESION_MS = 12 * 60 * 60 * 1000;
 const MIN_CONTRASENA = 8;
 const TIPOS = ["Admin", "User"];
 
+// Unicos que administran usuarios (crear, editar, eliminar, cambiar tipo, contraseña temporal).
+// Los demas, aunque sean Admin, solo cambian su propia contraseña y su perfil.
+const GESTORES = (process.env.USUARIOS_GESTORES || "sguzmansalas217@gmail.com,robertomuniz1096@gmail.com")
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const esGestor = (email) => GESTORES.includes((email || "").toLowerCase()) || esSuperAdmin({ user: { email } });
+
 let SECRETO = process.env.SESION_SECRETO;
 if (!SECRETO) {
   SECRETO = crypto.randomBytes(32).toString("hex");
@@ -61,7 +67,7 @@ function leerToken(token) {
 // Forma del usuario que reciben las rutas (req.user) y la pantalla.
 const publico = (u) => ({
   uid: String(u.id), id: u.id, email: u.email, nombre: u.nombre, tipoUsuario: u.tipo,
-  activo: u.activo, debeCambiar: u.debe_cambiar,
+  activo: u.activo, debeCambiar: u.debe_cambiar, gestorUsuarios: esGestor(u.email),
 });
 
 const COLUMNAS = `id, email, nombre, tipo, activo, debe_cambiar, sesion_version, password_hash,
@@ -112,9 +118,11 @@ function registrarFallo(email) {
 
 // ------------------ RUTAS ------------------
 export function registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey }) {
-  const esAdmin = (req) => req.user?.tipoUsuario === "Admin" || esSuperAdmin(req);
-  const soloAdmin = [verificarApiKey, (req, res, next) => (esAdmin(req) ? next() : res.status(403).json({ error: "Solo administradores" }))];
+  const soloGestor = [verificarApiKey, (req, res, next) =>
+    (esGestor(req.user?.email) ? next() : res.status(403).json({ error: "No tienes permiso para administrar usuarios" }))];
   const correo = (v) => (v || "").toString().trim().toLowerCase();
+  const CORREO_VALIDO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const limpiarNombre = (v) => (v || "").toString().trim().slice(0, 120) || null;
 
   app.post("/auth/login", soloApiKey, async (req, res) => {
     const email = correo(req.body?.email);
@@ -162,10 +170,40 @@ export function registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey 
     }
   });
 
-  // ---------- Administracion (solo Admin) ----------
+  // Cada usuario edita su propio perfil (nombre).
+  app.put("/auth/perfil", verificarApiKey, async (req, res) => {
+    try {
+      const r = await pool.query(
+        `UPDATE usuarios_sistema SET nombre = $1 WHERE id = $2 RETURNING ${COLUMNAS}`,
+        [limpiarNombre(req.body?.nombre), req.user.id]
+      );
+      res.json(publico(r.rows[0]));
+    } catch (error) {
+      console.error("Error al guardar perfil:", error);
+      res.status(500).json({ error: "No se pudo guardar el perfil" });
+    }
+  });
+
+  // ---------- Administracion (solo USUARIOS_GESTORES) ----------
   const protegido = (u) => esSuperAdmin({ user: { email: u.email } });
 
-  app.get("/usuarios", ...soloAdmin, async (req, res) => {
+  // Busca al usuario de :id y aplica las reglas comunes: existe y no es el super admin
+  // (salvo que el propio super admin se edite a si mismo).
+  async function usuarioEditable(req, res) {
+    const r = await pool.query(`SELECT ${COLUMNAS} FROM usuarios_sistema WHERE id = $1`, [req.params.id]);
+    const u = r.rows[0];
+    if (!u) {
+      res.status(404).json({ error: "Usuario no encontrado" });
+      return null;
+    }
+    if (protegido(u) && u.id !== req.user.id) {
+      res.status(403).json({ error: "Esta cuenta no se puede modificar" });
+      return null;
+    }
+    return u;
+  }
+
+  app.get("/usuarios", ...soloGestor, async (req, res) => {
     try {
       const r = await pool.query(`SELECT ${COLUMNAS} FROM usuarios_sistema ORDER BY email`);
       res.json(r.rows.map(u => ({
@@ -177,16 +215,16 @@ export function registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey 
     }
   });
 
-  app.post("/usuarios", ...soloAdmin, async (req, res) => {
+  app.post("/usuarios", ...soloGestor, async (req, res) => {
     const email = correo(req.body?.email);
     const { nombre, tipo, contrasena } = req.body || {};
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Correo inválido" });
+    if (!CORREO_VALIDO.test(email)) return res.status(400).json({ error: "Correo inválido" });
     if (!TIPOS.includes(tipo)) return res.status(400).json({ error: "Tipo de usuario inválido" });
     if (!contrasenaValida(contrasena)) return res.status(400).json({ error: `La contraseña debe tener al menos ${MIN_CONTRASENA} caracteres` });
     try {
       await pool.query(
         `INSERT INTO usuarios_sistema (email, nombre, tipo, password_hash, debe_cambiar) VALUES ($1, $2, $3, $4, true)`,
-        [email, (nombre || "").toString().trim() || null, tipo, cifrarContrasena(contrasena)]
+        [email, limpiarNombre(nombre), tipo, cifrarContrasena(contrasena)]
       );
       res.json({ ok: true });
     } catch (error) {
@@ -196,33 +234,57 @@ export function registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey 
     }
   });
 
-  // Cambia tipo (Admin/User). Nadie cambia su propio tipo ni toca al super admin.
-  app.put("/usuarios/:id", ...soloAdmin, async (req, res) => {
-    const { tipo } = req.body || {};
-    if (!TIPOS.includes(tipo)) return res.status(400).json({ error: "Tipo de usuario inválido" });
+  // Edita perfil y tipo: { nombre?, email?, tipo? }. Nadie cambia su propio tipo.
+  app.put("/usuarios/:id", ...soloGestor, async (req, res) => {
+    const body = req.body || {};
+    if (body.tipo !== undefined && !TIPOS.includes(body.tipo)) return res.status(400).json({ error: "Tipo de usuario inválido" });
+    if (body.email !== undefined && !CORREO_VALIDO.test(correo(body.email))) return res.status(400).json({ error: "Correo inválido" });
     try {
-      const r = await pool.query(`SELECT ${COLUMNAS} FROM usuarios_sistema WHERE id = $1`, [req.params.id]);
-      const u = r.rows[0];
-      if (!u) return res.status(404).json({ error: "Usuario no encontrado" });
-      if (protegido(u)) return res.status(403).json({ error: "Esta cuenta no se puede modificar" });
-      if (u.id === req.user.id) return res.status(400).json({ error: "No puedes cambiar tu propio tipo" });
-      await pool.query(`UPDATE usuarios_sistema SET tipo = $1 WHERE id = $2`, [tipo, u.id]);
+      const u = await usuarioEditable(req, res);
+      if (!u) return;
+      if (body.tipo !== undefined && body.tipo !== u.tipo && u.id === req.user.id) {
+        return res.status(400).json({ error: "No puedes cambiar tu propio tipo" });
+      }
+      // Si cambia el correo de alguien, sus sesiones se cierran (entra con el correo nuevo).
+      const nuevoCorreo = body.email !== undefined ? correo(body.email) : u.email;
+      await pool.query(
+        `UPDATE usuarios_sistema SET nombre = $1, email = $2, tipo = $3,
+                sesion_version = sesion_version + CASE WHEN $2 <> email THEN 1 ELSE 0 END
+         WHERE id = $4`,
+        [body.nombre !== undefined ? limpiarNombre(body.nombre) : u.nombre, nuevoCorreo, body.tipo ?? u.tipo, u.id]
+      );
       res.json({ ok: true });
     } catch (error) {
-      console.error("Error al cambiar tipo de usuario:", error);
+      if (error.code === "23505") return res.status(400).json({ error: "Ese correo ya está registrado" });
+      console.error("Error al editar usuario:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Elimina la cuenta. Sus registros en la base se conservan (guardan el correo como texto).
+  app.delete("/usuarios/:id", ...soloGestor, async (req, res) => {
+    try {
+      const u = await usuarioEditable(req, res);
+      if (!u) return;
+      if (u.id === req.user.id) return res.status(400).json({ error: "No puedes eliminar tu propia cuenta" });
+      if (protegido(u)) return res.status(403).json({ error: "Esta cuenta no se puede eliminar" });
+      await pool.query(`DELETE FROM usuarios_sistema WHERE id = $1`, [u.id]);
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("Error al eliminar usuario:", error);
       res.status(500).json({ error: error.message });
     }
   });
 
   // Contraseña temporal: el usuario debe cambiarla al entrar y se cierran sus sesiones abiertas.
-  app.post("/usuarios/:id/contrasena-temporal", ...soloAdmin, async (req, res) => {
+  // A uno mismo no (para eso esta cambiar contraseña).
+  app.post("/usuarios/:id/contrasena-temporal", ...soloGestor, async (req, res) => {
     const { contrasena } = req.body || {};
     if (!contrasenaValida(contrasena)) return res.status(400).json({ error: `La contraseña debe tener al menos ${MIN_CONTRASENA} caracteres` });
     try {
-      const r = await pool.query(`SELECT ${COLUMNAS} FROM usuarios_sistema WHERE id = $1`, [req.params.id]);
-      const u = r.rows[0];
-      if (!u) return res.status(404).json({ error: "Usuario no encontrado" });
-      if (protegido(u)) return res.status(403).json({ error: "Esta cuenta no se puede modificar" });
+      const u = await usuarioEditable(req, res);
+      if (!u) return;
+      if (u.id === req.user.id) return res.status(400).json({ error: "Para tu cuenta usa Cambiar contraseña" });
       await pool.query(
         `UPDATE usuarios_sistema SET password_hash = $1, debe_cambiar = true, sesion_version = sesion_version + 1 WHERE id = $2`,
         [cifrarContrasena(contrasena), u.id]
