@@ -5,7 +5,7 @@
 const listaCorreos = (valor) => valor.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 const SUPER_ADMINS = listaCorreos(process.env.SUPER_ADMIN || "sguzmansalas217@gmail.com");
 
-const esSuperAdmin = (req) => SUPER_ADMINS.includes((req.user?.email || "").toLowerCase());
+export const esSuperAdmin = (req) => SUPER_ADMINS.includes((req.user?.email || "").toLowerCase());
 
 // Las fechas se manejan como texto YYYY-MM-DD en hora de Mexico, sin depender de la zona del servidor.
 const hoyMexico = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Mexico_City" }).format(new Date());

@@ -3,10 +3,9 @@ import cors from "cors";
 import compression from "compression";
 import pkg from "pg";
 import dotenv from "dotenv";
-import { initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
 import { crearTablasCertificados, registrarRutasCertificados } from "./certificadosEstatales.js";
 import { crearTablaPago, registrarRutasPago, sistemaSuspendido } from "./controlPago.js";
+import { crearTablaUsuarios, registrarRutasUsuarios, verificarSesion } from "./usuarios.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -17,10 +16,6 @@ if (!API_KEY) {
   console.error("❌ Falta API_KEY en el .env, el servidor no arranca");
   process.exit(1);
 }
-
-// 🔒 Firebase solo para verificar el token del usuario logueado (no requiere credenciales)
-initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || "verificadora-2909f" });
-const firebaseAuth = getAuth();
 
 // 🔒 CORS: si CORS_ORIGINS viene en el .env (separado por comas), solo esos origenes pueden llamar la API
 const corsOrigins = (process.env.CORS_ORIGINS || "").split(",").map(o => o.trim()).filter(Boolean);
@@ -33,7 +28,16 @@ app.use(compression());
 app.use("/certificados-estatales", express.json({ limit: "5mb" }));
 app.use(express.json());
 
-// 🔒 Pide la API key Y el token de Firebase del usuario logueado
+// 🔒 Solo la API key (para el login, cuando todavia no hay sesion)
+const soloApiKey = (req, res, next) => {
+  const key = req.headers["x-api-key"];
+  if (!key || key !== API_KEY) {
+    return res.status(403).json({ error: "No autorizado" });
+  }
+  next();
+};
+
+// 🔒 Pide la API key Y la sesion del usuario logueado (usuarios.js)
 const verificarApiKey = async (req, res, next) => {
   const key = req.headers["x-api-key"];
 
@@ -47,13 +51,22 @@ const verificarApiKey = async (req, res, next) => {
   }
 
   try {
-    req.user = await firebaseAuth.verifyIdToken(token);
-  } catch {
+    req.user = await verificarSesion(pool, token);
+  } catch (error) {
+    console.error("Error al verificar sesión:", error.message);
+    req.user = null;
+  }
+  if (!req.user) {
     return res.status(401).json({ error: "Sesión inválida o expirada" });
   }
 
-  // 🔒 Pago vencido: se niega todo menos /pago/*, que la pantalla usa para mostrar el aviso.
-  if (!req.path.startsWith("/pago/") && await sistemaSuspendido(pool, req)) {
+  // 🔒 Con contraseña temporal solo puede cambiarla (y ver su sesion) hasta que la cambie.
+  if (req.user.debeCambiar && !req.path.startsWith("/auth/")) {
+    return res.status(403).json({ debeCambiar: true, error: "Debes cambiar tu contraseña" });
+  }
+
+  // 🔒 Pago vencido: se niega todo menos /pago/* y /auth/*, que la pantalla usa para la sesion y el aviso.
+  if (!req.path.startsWith("/pago/") && !req.path.startsWith("/auth/") && await sistemaSuspendido(pool, req)) {
     return res.status(423).json({ suspendido: true, error: "Sistema suspendido. Contacta al administrador." });
   }
 
@@ -871,10 +884,13 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
 
 registrarRutasCertificados(app, { pool, verificarApiKey });
 registrarRutasPago(app, { pool, verificarApiKey });
+registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey });
 
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
-crearTablasCertificados(pool)
+crearTablaUsuarios(pool)
+  .catch(err => console.error("⚠️ No se pudo crear la tabla de usuarios:", err.message))
+  .then(() => crearTablasCertificados(pool))
   .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados estatales:", err.message))
   .then(() => crearTablaPago(pool))
   .catch(err => console.error("⚠️ No se pudo crear la tabla de control de pago:", err.message))
