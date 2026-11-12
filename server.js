@@ -697,6 +697,7 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
       tipoOrden, parque, cliente, telefono, fecha, facturaOR, razonSocial, rfc,
       calleNumero, colonia, estadoMunicipio, mail,
       certFisico, certEmisiones1, certEmisiones2,
+      precioFisico, precioEmisiones1, precioEmisiones2,
       total, vehiculos, usuarioactual
     } = req.body;
 
@@ -711,15 +712,17 @@ app.post("/orden-trabajo/folio", verificarApiKey, async (req, res) => {
         (tipo, numero, parque, cliente, telefono, fecha, factura_or, razon_social, rfc,
          calle_numero, colonia, estado_municipio, mail,
          cert_fisico, cert_emisiones1, cert_emisiones2,
-         total, vehiculos, usuarioactual)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         total, vehiculos, usuarioactual,
+         precio_fisico, precio_emisiones1, precio_emisiones2)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING *;`,
       [
         tipo, numero, parque || null, cliente || null, telefono || null, fecha || null,
         facturaOR || null, razonSocial || null, rfc || null,
         calleNumero || null, colonia || null, estadoMunicipio || null, mail || null,
         !!certFisico, !!certEmisiones1, !!certEmisiones2,
-        total ?? null, JSON.stringify(vehiculos || []), usuarioactual || "UsuarioNodeJS"
+        total ?? null, JSON.stringify(vehiculos || []), usuarioactual || "UsuarioNodeJS",
+        precioONull(precioFisico), precioONull(precioEmisiones1), precioONull(precioEmisiones2)
       ]
     );
 
@@ -751,13 +754,14 @@ const COLUMNAS_EDITABLES_VEHICULO = {
   estatal: ["nota", "certificado", "multa", "costo", "referencia", "nombrecliente"],
 };
 const TABLA_ORIGEN_POR_TIPO = { federal: "registrofederal", estatal: "registros" };
+const precioONull = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
 const COLUMNAS_NUMERICAS_VEHICULO = ["multa", "costo", "certificado"];
 
 // Busca un vehiculo por placa en su tabla de origen. Devuelve { vehiculo } o { error, status }.
 async function buscarVehiculoOrden(db, tipo, placa, parque) {
   if (tipo === "federal") {
     const r = await db.query(
-      `SELECT id, placa, parque, fisico, emisiones1, emisiones2
+      `SELECT id, placa, parque, ejes, fisico, emisiones1, emisiones2
          FROM registrofederal WHERE upper(btrim(placa)) = upper(btrim($1)) ORDER BY id DESC;`,
       [placa]
     );
@@ -781,6 +785,27 @@ async function buscarVehiculoOrden(db, tipo, placa, parque) {
 }
 
 // 🔹 Buscar un vehiculo por placa para agregarlo a una orden existente
+// Ultimos precios usados con el mismo cliente (parque), para precargar la orden nueva.
+app.get("/orden-trabajo/precios", verificarApiKey, async (req, res) => {
+  try {
+    const parque = (req.query.parque || "").toString().trim();
+    if (!parque) return res.json(null);
+    const r = await pool.query(
+      `SELECT precio_fisico, precio_emisiones1, precio_emisiones2
+         FROM orden_trabajo_folios
+        WHERE tipo = 'federal' AND parque = $1
+          AND (precio_fisico IS NOT NULL OR precio_emisiones1 IS NOT NULL OR precio_emisiones2 IS NOT NULL)
+        ORDER BY creado_en DESC
+        LIMIT 1;`,
+      [parque]
+    );
+    res.json(r.rows[0] || null);
+  } catch (error) {
+    console.error("Error al buscar precios del cliente:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get("/orden-trabajo/buscar-vehiculo", verificarApiKey, async (req, res) => {
   try {
     const { tipo, placa, parque } = req.query;
@@ -805,6 +830,7 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
     cliente, telefono, fecha, facturaOR, razonSocial, rfc,
     calleNumero, colonia, estadoMunicipio, mail,
     certFisico, certEmisiones1, certEmisiones2,
+    precioFisico, precioEmisiones1, precioEmisiones2,
     total, vehiculos, cambiosVehiculos
   } = req.body;
 
@@ -817,7 +843,8 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
          cliente = $3, telefono = $4, fecha = $5, factura_or = $6, razon_social = $7, rfc = $8,
          calle_numero = $9, colonia = $10, estado_municipio = $11, mail = $12,
          cert_fisico = $13, cert_emisiones1 = $14, cert_emisiones2 = $15,
-         total = $16, vehiculos = $17
+         total = $16, vehiculos = $17,
+         precio_fisico = $18, precio_emisiones1 = $19, precio_emisiones2 = $20
        WHERE tipo = $1 AND numero = $2
        RETURNING *;`,
       [
@@ -825,7 +852,8 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
         razonSocial || null, rfc || null, calleNumero || null, colonia || null,
         estadoMunicipio || null, mail || null,
         !!certFisico, !!certEmisiones1, !!certEmisiones2,
-        total ?? null, JSON.stringify(vehiculos || [])
+        total ?? null, JSON.stringify(vehiculos || []),
+        precioONull(precioFisico), precioONull(precioEmisiones1), precioONull(precioEmisiones2)
       ]
     );
 
@@ -886,10 +914,22 @@ registrarRutasCertificados(app, { pool, verificarApiKey });
 registrarRutasPago(app, { pool, verificarApiKey });
 registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey });
 
+// Precios por orden federal: Fisico se cobra por eje, Emisiones por vehiculo.
+// Solo agrega columnas; las ordenes anteriores quedan con precios vacios.
+async function agregarPreciosOrden() {
+  await pool.query(`
+    ALTER TABLE orden_trabajo_folios ADD COLUMN IF NOT EXISTS precio_fisico NUMERIC;
+    ALTER TABLE orden_trabajo_folios ADD COLUMN IF NOT EXISTS precio_emisiones1 NUMERIC;
+    ALTER TABLE orden_trabajo_folios ADD COLUMN IF NOT EXISTS precio_emisiones2 NUMERIC;
+  `);
+}
+
 // 🔹 Servidor
 const PORT = process.env.PORT || 3000;
 crearTablaUsuarios(pool)
   .catch(err => console.error("⚠️ No se pudo crear la tabla de usuarios:", err.message))
+  .then(() => agregarPreciosOrden())
+  .catch(err => console.error("⚠️ No se pudieron agregar los precios a orden_trabajo_folios:", err.message))
   .then(() => crearTablasCertificados(pool))
   .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados estatales:", err.message))
   .then(() => crearTablaPago(pool))
