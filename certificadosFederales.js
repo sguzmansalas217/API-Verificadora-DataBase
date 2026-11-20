@@ -25,6 +25,7 @@ const Dictamen = (folio) => z.object({
 
 const Tarjeta = z.object({
   folio: z.string().describe("Folio impreso de la tarjeta, el que esta debajo del codigo de barras (ej. 1054779). No uses numeros escritos a mano"),
+  economico: z.string().describe("Numero economico de la unidad: el numero grande escrito a mano con marcador en la mitad vacia de la tarjeta, junto al codigo de barras (ej. 306). No es el numero de la calle del domicilio. Vacio si no hay"),
   placa: z.string(),
   nombre: z.string().describe("Nombre o razon social"),
   serie: z.string().describe("NIV / numero de serie"),
@@ -99,6 +100,7 @@ export async function crearTablasCertificadosFederales(pool) {
       usuarioactual  TEXT,
       created_at     TIMESTAMP NOT NULL DEFAULT now()
     );
+    ALTER TABLE tarjetas_circulacion_federal ADD COLUMN IF NOT EXISTS economico TEXT;
     CREATE INDEX IF NOT EXISTS idx_certificados_federales_placa ON certificados_federales (placa);
     CREATE INDEX IF NOT EXISTS idx_certificados_federales_serie ON certificados_federales (serie);
     CREATE INDEX IF NOT EXISTS idx_certificados_federales_certificado ON certificados_federales (certificado);
@@ -213,10 +215,10 @@ export function registrarRutasCertificadosFederales(app, { pool, verificarApiKey
         const ins = clase === "tarjeta"
           ? await db.query(
               `INSERT INTO tarjetas_circulacion_federal
-                 (folio, placa, nombre, serie, marca, fecha, revisar, motivo_revisar, pagina_id, usuarioactual)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-               RETURNING id, folio, placa, nombre, serie, marca, revisar, motivo_revisar`,
-              [d.folio, d.placa, d.nombre, d.serie, d.marca, fecha, motivos.length > 0, motivos.join(", ") || null, paginaId, req.user.email])
+                 (folio, economico, placa, nombre, serie, marca, fecha, revisar, motivo_revisar, pagina_id, usuarioactual)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               RETURNING id, folio, economico, placa, nombre, serie, marca, revisar, motivo_revisar`,
+              [d.folio, d.economico, d.placa, d.nombre, d.serie, d.marca, fecha, motivos.length > 0, motivos.join(", ") || null, paginaId, req.user.email])
           : await db.query(
               `INSERT INTO certificados_federales
                  (clase, certificado, placa, nombre, serie, marca, fecha, tarjeta, revisar, motivo_revisar, pagina_id, usuarioactual)
@@ -253,11 +255,11 @@ export function registrarRutasCertificadosFederales(app, { pool, verificarApiKey
         `SELECT c.id, c.clase, c.certificado, c.placa, c.nombre, c.serie, c.marca,
                 to_char(c.fecha, 'YYYY-MM-DD') AS fecha, c.tarjeta, c.revisar, c.motivo_revisar,
                 c.pagina_id, p.tipo, p.bytes, p.archivo_pdf, p.pagina, c.usuarioactual, c.created_at,
-                t.id AS tarjeta_id, t.folio AS tarjeta_folio, t.pagina_id AS tarjeta_pagina_id
+                t.id AS tarjeta_id, t.folio AS tarjeta_folio, t.economico, t.pagina_id AS tarjeta_pagina_id
          FROM certificados_federales c
          JOIN certificados_federales_pagina p ON p.id = c.pagina_id
          LEFT JOIN LATERAL (
-           SELECT t.id, t.folio, t.pagina_id
+           SELECT t.id, t.folio, t.economico, t.pagina_id
            FROM tarjetas_circulacion_federal t
            WHERE c.clase = 'fisico'
              AND ((c.serie <> '' AND t.serie = c.serie) OR (c.placa <> '' AND t.placa = c.placa))
@@ -272,9 +274,10 @@ export function registrarRutasCertificadosFederales(app, { pool, verificarApiKey
            AND ($4 = '' OR c.nombre ILIKE '%' || $4 || '%')
            AND ($5 = '' OR c.fecha >= NULLIF($5, '')::date)
            AND ($6 = '' OR c.fecha <= NULLIF($6, '')::date)
+           AND ($7 = '' OR t.economico ILIKE '%' || $7 || '%')
          ORDER BY c.id DESC
          LIMIT 500`,
-        [tipo, texto(req, "certificado"), texto(req, "placa"), texto(req, "nombre"), fecha(req, "desde"), fecha(req, "hasta")]
+        [tipo, texto(req, "certificado"), texto(req, "placa"), texto(req, "nombre"), fecha(req, "desde"), fecha(req, "hasta"), texto(req, "economico")]
       );
       // Lo de la tarjeta se revisa al listar porque la tarjeta puede subirse despues del dictamen.
       const filas = result.rows.map(c => {
@@ -283,7 +286,7 @@ export function registrarRutasCertificadosFederales(app, { pool, verificarApiKey
           if (!c.tarjeta_id) motivos.push("sin tarjeta");
           else if (c.tarjeta && c.tarjeta_folio && c.tarjeta !== c.tarjeta_folio) motivos.push("folio de tarjeta no coincide");
         } else {
-          c.tarjeta_id = c.tarjeta_folio = c.tarjeta_pagina_id = null;
+          c.tarjeta_id = c.tarjeta_folio = c.tarjeta_pagina_id = c.economico = null;
         }
         return { ...c, revisar: motivos.length > 0, motivo_revisar: motivos.join(", ") || null };
       });
@@ -297,7 +300,7 @@ export function registrarRutasCertificadosFederales(app, { pool, verificarApiKey
   app.get("/tarjetas-federales", ...lectores, async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT t.id, t.folio, t.placa, t.nombre, t.serie, t.marca, to_char(t.fecha, 'YYYY-MM-DD') AS fecha,
+        `SELECT t.id, t.folio, t.economico, t.placa, t.nombre, t.serie, t.marca, to_char(t.fecha, 'YYYY-MM-DD') AS fecha,
                 t.revisar, t.motivo_revisar, t.pagina_id, p.tipo, p.bytes, p.archivo_pdf, p.pagina,
                 t.usuarioactual, t.created_at
          FROM tarjetas_circulacion_federal t
