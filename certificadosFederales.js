@@ -1,9 +1,9 @@
-// 🔹 Certificados federales (prueba): el front manda cada pagina completa del PDF escaneado (sin
-// recortar ni enderezar) y aqui la IA lee los datos principales. Los PDFs vienen separados por tipo:
-//   fisico    -> dictamen fisico-mecanico (folio M-...) o de arrastre (folio A-...), 1 por hoja
-//   emisiones -> dictamen de emisiones, puede haber 2 por hoja (dos renglones, misma imagen)
-//   tarjeta   -> tarjeta de circulacion; se liga al fisico de la misma serie o placa al listar
-// La imagen se guarda una vez por pagina. Permisos y modelo iguales que en estatales.
+// 🔹 Certificados federales (prueba): el front manda una imagen por documento y aqui la IA lee los
+// datos principales. Los PDFs vienen separados por tipo (el front lo detecta):
+//   fisico    -> dictamen fisico-mecanico (folio M-...) o de arrastre (folio A-...), pagina completa
+//   emisiones -> dictamen de emisiones; vienen 2 por hoja y el front recorta cada uno por su marco verde
+//   tarjeta   -> tarjeta de circulacion, enderezada; se liga al fisico de la misma serie o placa al listar
+// La imagen se guarda una vez (tabla _pagina) aunque la IA encuentre mas de un documento en ella. Permisos y modelo iguales que en estatales.
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -40,11 +40,11 @@ const LECTURA = {
   },
   emisiones: {
     esquema: Dictamen("No. del dictamen arriba a la derecha, ej. 22047502"),
-    documento: "dictamen de verificacion de emisiones (puede haber 2 por hoja)",
+    documento: "dictamen de verificacion de emisiones",
   },
   tarjeta: {
     esquema: Tarjeta,
-    documento: "tarjeta de circulacion federal (puede venir girada)",
+    documento: "tarjeta de circulacion federal",
   },
 };
 
