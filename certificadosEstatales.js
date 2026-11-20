@@ -5,10 +5,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 
-const MODELO = process.env.CERTIFICADOS_MODELO || "claude-haiku-5-5";
+export const MODELO = process.env.CERTIFICADOS_MODELO || "claude-haiku-5-5";
 // USD por millon de tokens (entrada, salida). El costo de cada lectura se guarda en la base
 // pero no se envia a la pantalla; se consulta con SQL.
-const PRECIOS = {
+export const PRECIOS = {
   "claude-haiku-5-5": [0.10, 0.50],
   "claude-sonnet-5-5": [2, 10],
   "claude-opus-5-5": [4, 20],
@@ -21,14 +21,14 @@ const ADMINISTRADORES = listaCorreos(process.env.CERTIFICADOS_USUARIOS || "sguzm
 
 // Usuarios que pueden subir para probar, con un tope de certificados (no eliminan).
 const SUBIDA_LIMITADA = listaCorreos(process.env.CERTIFICADOS_SUBIDA_LIMITADA || "robertomuniz1096@gmail.com");
-const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 200;
+export const LIMITE_PRUEBA = Number(process.env.CERTIFICADOS_LIMITE_PRUEBA) || 200;
 
-const correo = (req) => (req.user?.email || "").toLowerCase();
-const esAdministrador = (req) => ADMINISTRADORES.includes(correo(req));
-const tieneSubidaLimitada = (req) => !esAdministrador(req) && SUBIDA_LIMITADA.includes(correo(req));
-const esLector = (req) => !!req.user;
+export const correo = (req) => (req.user?.email || "").toLowerCase();
+export const esAdministrador = (req) => ADMINISTRADORES.includes(correo(req));
+export const tieneSubidaLimitada = (req) => !esAdministrador(req) && SUBIDA_LIMITADA.includes(correo(req));
+export const esLector = (req) => !!req.user;
 
-const TIPOS_IMAGEN = ["image/webp", "image/jpeg", "image/png"];
+export const TIPOS_IMAGEN = ["image/webp", "image/jpeg", "image/png"];
 
 const Certificado = z.object({
   certificado: z.string().describe("Folio grande junto a AG_UI"),
@@ -45,7 +45,7 @@ const PROMPT = `Certificado de verificacion vehicular escaneado. Extrae los dato
 (no las etiquetas del formato). Si un campo no se ve, deja "".`;
 
 let cliente = null;
-function clienteAnthropic() {
+export function clienteAnthropic() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   cliente ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   return cliente;

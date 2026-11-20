@@ -4,6 +4,7 @@ import compression from "compression";
 import pkg from "pg";
 import dotenv from "dotenv";
 import { crearTablasCertificados, registrarRutasCertificados } from "./certificadosEstatales.js";
+import { crearTablasCertificadosFederales, registrarRutasCertificadosFederales } from "./certificadosFederales.js";
 import { crearTablaPago, registrarRutasPago, sistemaSuspendido } from "./controlPago.js";
 import { crearTablaUsuarios, registrarRutasUsuarios, verificarSesion } from "./usuarios.js";
 
@@ -26,6 +27,7 @@ app.use(cors(corsOrigins.length ? { origin: corsOrigins } : undefined));
 app.use(compression());
 // Las imagenes de certificados llegan en base64 y pasan el limite de 100kb por defecto.
 app.use("/certificados-estatales", express.json({ limit: "5mb" }));
+app.use("/certificados-federales", express.json({ limit: "5mb" }));
 app.use(express.json());
 
 // 🔒 Solo la API key (para el login, cuando todavia no hay sesion)
@@ -911,6 +913,7 @@ app.put("/orden-trabajo/:tipo/:numero", verificarApiKey, async (req, res) => {
 });
 
 registrarRutasCertificados(app, { pool, verificarApiKey });
+registrarRutasCertificadosFederales(app, { pool, verificarApiKey });
 registrarRutasPago(app, { pool, verificarApiKey });
 registrarRutasUsuarios(app, { pool, verificarApiKey, soloApiKey });
 
@@ -932,6 +935,8 @@ crearTablaUsuarios(pool)
   .catch(err => console.error("⚠️ No se pudieron agregar los precios a orden_trabajo_folios:", err.message))
   .then(() => crearTablasCertificados(pool))
   .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados estatales:", err.message))
+  .then(() => crearTablasCertificadosFederales(pool))
+  .catch(err => console.error("⚠️ No se pudieron crear las tablas de certificados federales:", err.message))
   .then(() => crearTablaPago(pool))
   .catch(err => console.error("⚠️ No se pudo crear la tabla de control de pago:", err.message))
   .then(() => cargarColumnas())
